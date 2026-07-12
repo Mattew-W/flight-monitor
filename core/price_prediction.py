@@ -5,6 +5,7 @@ price forecast charts from current time to departure date.
 """
 import logging
 import math
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 
@@ -76,7 +77,6 @@ def generate_synthetic_historical_data(current_price: float, days_back: int = 30
     if current_price <= 0:
         return []
     
-    import random
     random.seed(int(current_price * 1000) % 2**31)
     
     historical = []

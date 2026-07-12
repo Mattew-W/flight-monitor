@@ -175,22 +175,23 @@ class CtripBrowserSource(BaseDataSource):
                 except Exception as e:
                     logger.warning(f"CtripBrowserSource: Failed to parse flight list: {e}")
 
-        # Remove old listener first to avoid duplicates
-        self._page.remove_listener("response", on_flight_list)
         self._page.on("response", on_flight_list)
 
-        # Navigate to flight list page with route params
-        dep_enc = quote(query.departure)
-        arr_enc = quote(query.destination)
-        search_url = (
-            f"https://m.ctrip.com/html5/flight/swift/list"
-            f"?dcity={dep_enc}&acity={arr_enc}"
-            f"&ddate={query.departure_date}&cabin=Y_S&adult=1&child=0&infant=0"
-        )
+        try:
+            # Navigate to flight list page with route params
+            dep_enc = quote(query.departure)
+            arr_enc = quote(query.destination)
+            search_url = (
+                f"https://m.ctrip.com/html5/flight/swift/list"
+                f"?dcity={dep_enc}&acity={arr_enc}"
+                f"&ddate={query.departure_date}&cabin=Y_S&adult=1&child=0&infant=0"
+            )
 
-        logger.info(f"CtripBrowserSource: Navigating to flight list page...")
-        self._page.goto(search_url, wait_until="domcontentloaded")
-        self._page.wait_for_timeout(15000)
+            logger.info(f"CtripBrowserSource: Navigating to flight list page...")
+            self._page.goto(search_url, wait_until="domcontentloaded")
+            self._page.wait_for_timeout(15000)
+        finally:
+            self._page.remove_listener("response", on_flight_list)
 
         if not flight_data:
             logger.warning("CtripBrowserSource: No flight list data intercepted")

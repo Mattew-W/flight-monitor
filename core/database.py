@@ -4,6 +4,7 @@ Handles SQLite operations for all persistent data.
 """
 import sqlite3
 import os
+import uuid
 from datetime import datetime
 from typing import List, Optional
 from .models import SearchQuery, FlightPrice, PriceAlert, AlertHistory
@@ -206,7 +207,6 @@ class Database:
     def add_price_records(self, records: List[FlightPrice]):
         conn = self._get_conn()
         try:
-            import uuid
             batch_id = str(uuid.uuid4())[:8]
             now = datetime.now().isoformat()
             conn.executemany(
@@ -476,7 +476,7 @@ class Database:
             duration=row["duration"], stops=row["stops"], price=row["price"],
             cabin_class=row["cabin_class"], source=row["source"],
             recorded_at=row["recorded_at"],
-            purchase_url=row["purchase_url"] if "purchase_url" in row.keys() else "",
+            purchase_url=row["purchase_url"] if "purchase_url" in row else "",
         )
 
     def _row_to_alert(self, row) -> PriceAlert:

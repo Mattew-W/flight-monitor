@@ -1,2 +1,7 @@
 flask>=3.0.0
 requests>=2.31.0
+
+# Optional dependencies (partial functionality without them):
+# numpy>=1.24.0       # ARIMA price prediction model (falls back to simpler model)
+# playwright>=1.40.0  # Ctrip real-time browser data source (falls back to mock data)
+#                     # Requires: playwright install chromium

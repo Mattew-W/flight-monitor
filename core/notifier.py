@@ -2,6 +2,7 @@
 Flight Monitor - Notifier
 Handles price alert notifications via multiple channels.
 """
+import html
 import json
 import logging
 import smtplib
@@ -40,6 +41,8 @@ class Notifier:
             self._send_email(title, message)
         if send_wechat:
             self._send_serverchan(title, message)
+        if FEISHU_WEBHOOK:
+            self._send_feishu(title, message)
 
     def _send_email(self, subject: str, body: str):
         """Send email notification."""
@@ -51,16 +54,15 @@ class Notifier:
             msg["From"] = SMTP_USER
             msg["To"] = EMAIL_TO
             msg["Subject"] = subject
-            import html as html_mod
-            safe_subject = html_mod.escape(subject)
-            safe_body = html_mod.escape(body)
+            safe_subject = html.escape(subject)
+            safe_body = html.escape(body)
             html_content = f"""
             <html><body style="font-family: 'Microsoft YaHei', sans-serif;">
             <div style="max-width:600px;margin:0 auto;padding:20px;">
                 <h2 style="color:#2563eb;">{safe_subject}</h2>
                 <div style="background:#f0f9ff;padding:20px;border-radius:10px;
                             border-left:4px solid #2563eb;">
-                    <pre style="white-space:-wrap;font-family:inherit;">{safe_body}</pre>
+                    <pre style="white-space:pre-wrap;font-family:inherit;">{safe_body}</pre>
                 </div>
                 <p style="color:#94a3b8;font-size:12px;margin-top:20px;">
                     Flight Monitor | {datetime.now().strftime('%Y-%m-%d %H:%M')}

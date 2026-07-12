@@ -7,13 +7,12 @@ import os
 import csv
 import io
 from flask import Flask, request, jsonify, render_template, Response
-from typing import Dict
 from core.database import Database
 from core.models import SearchQuery, PriceAlert
 from core.monitor import PriceMonitor
 from core.price_prediction import generate_prediction_chart
 from config import (
-    DB_PATH, CITY_CODES, HOST, PORT,
+    DB_PATH, CITY_CODES,
     PURCHASE_PLATFORMS, POPULAR_ROUTES, CITY_GROUPS,
 )
 
@@ -230,7 +229,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         history.reverse()
         return jsonify([
             {
-                "recorded_at": h["recorded_at"],
+                "recorded_at": h["date"],
                 "min_price": round(h["min_price"], 0),
                 "avg_price": round(h["avg_price"], 0),
                 "max_price": round(h["max_price"], 0),

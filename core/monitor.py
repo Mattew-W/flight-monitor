@@ -39,7 +39,6 @@ class PriceMonitor:
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
-        self._lock = threading.Lock()
 
     def start(self):
         """Start the monitoring thread."""
