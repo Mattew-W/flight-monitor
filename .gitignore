@@ -1,0 +1,47 @@
+# Virtual Environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Temporary data files (can be regenerated)
+*.json
+*.png
+list_api_discovery.json
+flight_list_search_response.json
+flight_list_results.json
+all_api_calls.json
+api_discovery.json
+ctrip_api_calls.json
+ctrip_api_calls_full.json
+ctrip_flight_page.html
+ctrip_flight_results.png
+ctrip_flight_results_final.png
+ctrip_real_flights.json
+ctrip_test1.png
+ctrip_test2.png
+nul
+
+# Logs
+server.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local memory
+.workbuddy/

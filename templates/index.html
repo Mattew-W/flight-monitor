@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>航班价格监控 · Flight Monitor</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
+                </svg>
+            </div>
+            <div>
+                <div class="sidebar-title">航班监控</div>
+                <div class="sidebar-subtitle">Flight Price Monitor</div>
+            </div>
+        </div>
+        <nav class="sidebar-nav">
+            <a class="nav-item active" data-page="dashboard">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span>仪表盘</span>
+            </a>
+            <a class="nav-item" data-page="search">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                <span>搜索比价</span>
+            </a>
+            <a class="nav-item" data-page="trends">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                <span>价格趋势</span>
+            </a>
+            <a class="nav-item" data-page="alerts">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                <span>提醒管理</span>
+            </a>
+            <a class="nav-item" data-page="platforms">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+                <span>购买渠道</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="monitor-status" id="monitorStatus">
+                <div class="status-dot stopped"></div>
+                <span>监控未运行</span>
+            </div>
+            <button class="btn-toggle-monitor" id="toggleMonitorBtn" onclick="toggleMonitor()">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>启动监控</span>
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Dashboard Page -->
+        <div class="page active" id="page-dashboard">
+            <div class="page-header">
+                <h1>仪表盘</h1>
+                <p class="page-subtitle">航班价格监控总览</p>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#2563eb;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statQueries">0</div>
+                        <div class="stat-label">监控任务</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#16a34a;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statMonitoring">0</div>
+                        <div class="stat-label">运行中</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#fef3c7,#fde68a);color:#d97706;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statAlerts">0</div>
+                        <div class="stat-label">活跃提醒</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#fce7f3,#fbcfe8);color:#db2777;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statLowestPrice">--</div>
+                        <div class="stat-label">最低价(元)</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#e0e7ff,#c7d2fe);color:#4f46e5;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statPlatforms">0</div>
+                        <div class="stat-label">数据来源</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Popular Routes Quick Access -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>热门航线快速搜索</h3>
+                    <span class="card-hint">点击直达</span>
+                </div>
+                <div class="card-body">
+                    <div id="popularRoutes" class="popular-routes-grid"></div>
+                </div>
+            </div>
+
+            <div class="dashboard-grid">
+                <div class="card col-2">
+                    <div class="card-header">
+                        <h3>航线价格概览</h3>
+                        <button class="btn btn-sm btn-ghost" onclick="refreshDashboard()">刷新</button>
+                    </div>
+                    <div class="card-body">
+                        <div id="routePriceList" class="route-price-list">
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#cbd5e1" stroke-width="1.5"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
+                                <p>暂无监控数据，请先添加监控任务</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <h3>最近提醒</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="recentAlerts" class="alert-list">
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#cbd5e1" stroke-width="1.5"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                                <p>暂无提醒记录</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Search Page -->
+        <div class="page" id="page-search">
+            <div class="page-header">
+                <h1>搜索比价</h1>
+                <p class="page-subtitle">一键搜索多平台机票价格，横向比价找到最优惠渠道</p>
+            </div>
+
+            <!-- Popular Routes Quick Access -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>热门航线</h3>
+                    <span class="card-hint">一键填入</span>
+                </div>
+                <div class="card-body">
+                    <div id="popularRoutesSearch" class="popular-routes-grid"></div>
+                </div>
+            </div>
+
+            <div class="search-form-card card">
+                <div class="card-body">
+                    <form id="searchForm" class="search-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>出发城市</label>
+                                <select id="departure" class="form-select" required>
+                                    <option value="">选择出发城市</option>
+                                </select>
+                            </div>
+                            <div class="form-group swap-btn-group">
+                                <button type="button" class="swap-btn" onclick="swapCities()" title="交换城市">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3l4 4-4 4"/><path d="M20 7H4"/><path d="M8 21l-4-4 4-4"/><path d="M4 17h16"/></svg>
+                                </button>
+                            </div>
+                            <div class="form-group">
+                                <label>目的城市</label>
+                                <select id="destination" class="form-select" required>
+                                    <option value="">选择目的城市</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>出发日期</label>
+                                <input type="date" id="departureDate" class="form-input" required>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>舱位</label>
+                                <select id="cabinClass" class="form-select">
+                                    <option value="economy">经济舱</option>
+                                    <option value="business">商务舱</option>
+                                    <option value="first">头等舱</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>任务名称（可选）</label>
+                                <input type="text" id="label" class="form-input" placeholder="如：暑期回家">
+                            </div>
+                            <div class="form-group form-actions">
+                                <button type="submit" class="btn btn-primary btn-lg">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                                    搜索比价
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3>监控任务列表</h3>
+                    <button class="btn btn-sm btn-ghost" onclick="exportAllData()">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        导出数据
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div id="queryList" class="query-list">
+                        <div class="empty-state"><p>暂无监控任务</p></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Search Results Modal -->
+            <div id="searchResultsModal" class="modal" style="display:none;">
+                <div class="modal-content modal-xl">
+                    <div class="modal-header">
+                        <h3>搜索结果 · 多平台比价</h3>
+                        <button class="modal-close" onclick="closeModal('searchResultsModal')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="searchResults"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Price Prediction Modal -->
+            <div id="predictionModal" class="modal" style="display:none;">
+                <div class="modal-content modal-xl">
+                    <div class="modal-header">
+                        <h3 id="predictionTitle">价格预测 · 未来走势</h3>
+                        <button class="modal-close" onclick="closeModal('predictionModal')">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="prediction-info" id="predictionInfo"></div>
+                        <div class="chart-container" style="height:400px;">
+                            <canvas id="predictionChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trends Page -->
+        <div class="page" id="page-trends">
+            <div class="page-header">
+                <h1>价格趋势</h1>
+                <p class="page-subtitle">查看历史价格变化走势，把握最佳购票时机</p>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3>选择航线</h3>
+                </div>
+                <div class="card-body">
+                    <select id="trendQuerySelect" class="form-select" onchange="loadTrendChart()">
+                        <option value="">选择监控任务</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3 id="trendTitle">价格走势图</h3>
+                    <div class="trend-legend">
+                        <span class="legend-item"><span class="legend-dot" style="background:#2563eb;"></span>最低价</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span>平均价</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span>最高价</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="priceChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="card" id="trendStatsCard" style="display:none;">
+                <div class="card-header"><h3>价格统计</h3></div>
+                <div class="card-body">
+                    <div class="stats-grid" id="trendStats"></div>
+                </div>
+            </div>
+            <div class="card" id="trendFlightsCard" style="display:none;">
+                <div class="card-header">
+                    <h3>最新航班价格</h3>
+                    <button class="btn btn-sm btn-primary" onclick="refreshTrendFlights()">刷新价格</button>
+                </div>
+                <div class="card-body">
+                    <div id="trendFlights" class="flight-table-wrap"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alerts Page -->
+        <div class="page" id="page-alerts">
+            <div class="page-header">
+                <h1>提醒管理</h1>
+                <p class="page-subtitle">设置价格阈值，自动接收降价通知</p>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>添加价格提醒</h3></div>
+                <div class="card-body">
+                    <form id="alertForm" class="alert-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>选择航线</label>
+                                <select id="alertQuerySelect" class="form-select" required>
+                                    <option value="">选择监控任务</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>目标价格（元）</label>
+                                <input type="number" id="alertTargetPrice" class="form-input" placeholder="如 800" required min="0">
+                            </div>
+                            <div class="form-group form-actions">
+                                <button type="submit" class="btn btn-primary">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                                    添加提醒
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>提醒列表</h3></div>
+                <div class="card-body">
+                    <div id="alertList" class="alert-config-list">
+                        <div class="empty-state"><p>暂无价格提醒</p></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>提醒历史</h3></div>
+                <div class="card-body">
+                    <div id="alertHistoryList" class="alert-history-list">
+                        <div class="empty-state"><p>暂无提醒记录</p></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Platforms Page -->
+        <div class="page" id="page-platforms">
+            <div class="page-header">
+                <h1>购买渠道</h1>
+                <p class="page-subtitle">支持的机票预订平台和航司官网一览（国内+国际共20+渠道）</p>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3>OTA 在线旅行平台</h3>
+                    <span class="card-hint">国内4家 + 国际5家</span>
+                </div>
+                <div class="card-body">
+                    <div id="otaPlatforms" class="platform-grid"></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3>航空公司官网</h3>
+                    <span class="card-hint">国内6家 + 国际8家</span>
+                </div>
+                <div class="card-body">
+                    <div id="airlinePlatforms" class="platform-grid"></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>使用说明</h3></div>
+                <div class="card-body">
+                    <div class="info-list">
+                        <div class="info-item">
+                            <div class="info-icon">1</div>
+                            <div class="info-text">在「搜索比价」页面选择出发地、目的地和日期，支持<strong>国内城市和海外城市</strong></div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-icon">2</div>
+                            <div class="info-text">国内航线自动查询携程、去哪儿、飞猪、同程及国内航司官网；<strong>国际航线自动查询 Trip.com、Skyscanner、Google Flights、Kayak、Expedia 及国际航司官网</strong></div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-icon">3</div>
+                            <div class="info-text">搜索结果按价格排序，每个航班显示各平台比价，点击「去购买」直达订票页面</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-icon">4</div>
+                            <div class="info-text">在「提醒管理」设置目标价格，价格低于阈值时自动通知</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-icon">5</div>
+                            <div class="info-text">开启监控后，系统每5分钟自动刷新价格，在「价格趋势」查看走势图</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Toast notification -->
+<div id="toast" class="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
