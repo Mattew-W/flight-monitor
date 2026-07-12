@@ -45,3 +45,8 @@ Thumbs.db
 
 # Local memory
 .workbuddy/
+
+# Development artifacts
+crawler/
+test_*.py
+diag_*.py

@@ -161,10 +161,15 @@ class CtripBrowserSource(BaseDataSource):
 
         flight_data = []
 
-        # Intercept the flightListSearchForH5 response (full flight list)
-        def on_flight_list(response):
-            nonlocal flight_data
+        # Use route interception instead of response listener to catch ALL requests
+        all_urls = set()
+
+        def on_response(response):
+            nonlocal flight_data, all_urls
             url = response.url
+            if response.status == 200:
+                all_urls.add(url[:200])
+
             if "flightListSearchForH5" in url and response.status == 200:
                 try:
                     data = response.json()
@@ -175,7 +180,38 @@ class CtripBrowserSource(BaseDataSource):
                 except Exception as e:
                     logger.warning(f"CtripBrowserSource: Failed to parse flight list: {e}")
 
-        self._page.on("response", on_flight_list)
+            if "flightGloryList" in url and response.status == 200:
+                try:
+                    data = response.json()
+                    logger.info(f"CtripBrowserSource: flightGloryList response keys: {list(data.keys())[:10]}")
+                except Exception as e:
+                    logger.warning(f"CtripBrowserSource: flightGloryList parse failed: {e}")
+
+            if "getLowestPriceCalendar" in url and response.status == 200:
+                try:
+                    data = response.json()
+                    raw = data.get("data", "")
+                    if raw:
+                        flights = json.loads(raw) if isinstance(raw, str) else raw
+                        if isinstance(flights, list):
+                            # Save calendar data for fallback if flightList data is unavailable
+                            cal_flights = [{"price": f.get("price", 0), "airlineName": f.get("airlineName", ""),
+                                          "flightNo": f.get("flightNo", ""), "departureCityCode": f.get("departureCityCode", ""),
+                                          "arrivalCityCode": f.get("arrivalCityCode", "")} for f in flights]
+                            if not flight_data:
+                                flight_data = cal_flights
+                            logger.info(f"CtripBrowserSource: Intercepted {len(flights)} flights from calendar API")
+                except Exception as e:
+                    logger.warning(f"CtripBrowserSource: Calendar parse failed: {e}")
+
+        self._page.on("response", on_response)
+
+        # Also log all XHR requests to find the flight list API
+        def on_request(request):
+            url = request.url
+            if "restapi/soa2" in url or "flightList" in url or "flightlist" in url.lower():
+                all_urls.add(f"REQ:{url[:250]}")
+        self._page.on("request", on_request)
 
         try:
             # Navigate to flight list page with route params
@@ -191,10 +227,17 @@ class CtripBrowserSource(BaseDataSource):
             self._page.goto(search_url, wait_until="domcontentloaded")
             self._page.wait_for_timeout(15000)
         finally:
-            self._page.remove_listener("response", on_flight_list)
+            self._page.remove_listener("response", on_response)
+            self._page.remove_listener("request", on_request)
 
         if not flight_data:
             logger.warning("CtripBrowserSource: No flight list data intercepted")
+        # Always log intercepted URLs for debugging
+        flight_urls = [u for u in all_urls if "flight" in u.lower() or "search" in u.lower() or "api" in u.lower() or "json" in u.lower()]
+        if flight_urls:
+            logger.info(f"CtripBrowserSource: Intercepted {len(all_urls)} URLs, {len(flight_urls)} flight-related:")
+            for u in sorted(flight_urls)[:8]:
+                logger.info(f"  {u}")
 
         # Convert API response to FlightPrice objects
         now = datetime.now().isoformat()
@@ -203,38 +246,57 @@ class CtripBrowserSource(BaseDataSource):
             try:
                 if not isinstance(item, dict):
                     continue
-                mutilstn = item.get("mutilstn", [])
-                if not mutilstn or not isinstance(mutilstn, list):
-                    continue
-                seg = mutilstn[0]
-                if not isinstance(seg, dict):
-                    continue
 
-                basinfo = seg.get("basinfo", {})
-                dportinfo = seg.get("dportinfo", {})
-                aportinfo = seg.get("aportinfo", {})
-                dateinfo = seg.get("dateinfo", {})
-                craftinfo = seg.get("craftinfo", {})
-
-                flight_no = basinfo.get("flgno", "")
-                airline_code = basinfo.get("aircode", "")
-                airline_name = basinfo.get("airlineName", airline_code)
-                dep_airport = dportinfo.get("aport", dep_code)
-                arr_airport = aportinfo.get("aport", arr_code)
-                dep_time = dateinfo.get("ddate", "")
-                arr_time = dateinfo.get("adate", "")
-                aircraft = craftinfo.get("cdisname", "")
-                stops = dateinfo.get("dcnt", 0)
-
-                # Get price from policyinfo
+                airline_name = ""
+                flight_no = ""
+                dep_airport = ""
+                arr_airport = ""
+                dep_time = ""
+                arr_time = ""
+                aircraft = ""
+                stops = 0
                 lowest_price = 0
-                policyinfo = item.get("policyinfo", [])
-                for pol in policyinfo:
-                    if isinstance(pol, dict):
-                        price_val = pol.get("tprice", 0)
-                        if price_val and price_val > 0:
-                            lowest_price = price_val
-                            break
+
+                # Handle flightListSearchForH5 format
+                mutilstn = item.get("mutilstn", [])
+                if mutilstn and isinstance(mutilstn, list) and len(mutilstn) > 0:
+                    seg = mutilstn[0]
+                    if isinstance(seg, dict):
+                        basinfo = seg.get("basinfo", {})
+                        dportinfo = seg.get("dportinfo", {})
+                        aportinfo = seg.get("aportinfo", {})
+                        dateinfo = seg.get("dateinfo", {})
+                        craftinfo = seg.get("craftinfo", {})
+
+                        flight_no = basinfo.get("flgno", "")
+                        airline_code = basinfo.get("aircode", "")
+                        airline_name = basinfo.get("airlineName", airline_code)
+                        dep_airport = dportinfo.get("aport", dep_code)
+                        arr_airport = aportinfo.get("aport", arr_code)
+                        dep_time = dateinfo.get("ddate", "")
+                        arr_time = dateinfo.get("adate", "")
+                        aircraft = craftinfo.get("cdisname", "")
+                        stops = dateinfo.get("dcnt", 0)
+
+                        # Get price from policyinfo
+                        policyinfo = item.get("policyinfo", [])
+                        for pol in policyinfo:
+                            if isinstance(pol, dict):
+                                price_val = pol.get("tprice", 0)
+                                if price_val and price_val > 0:
+                                    lowest_price = price_val
+                                    break
+
+                # Handle calendar API format (getLowestPriceCalendar fallback)
+                elif "airlineName" in item and "price" in item:
+                    airline_name = item.get("airlineName", "")
+                    flight_no = item.get("flightNo", "")
+                    lowest_price = float(item.get("price", 0))
+                    dep_airport = item.get("departureCityCode", dep_code)
+                    arr_airport = item.get("arrivalCityCode", arr_code)
+                    # Calendar API doesn't have times, use empty strings
+                    dep_time = ""
+                    arr_time = ""
 
                 if not lowest_price or lowest_price <= 0:
                     continue
