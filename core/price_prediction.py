@@ -67,12 +67,13 @@ def get_historical_prices(db, query_id: int, days_back: int = 30) -> List[Dict]:
 
 def generate_synthetic_historical_data(current_price: float, days_back: int = 30) -> List[Dict]:
     """
-    Generate synthetic historical price data when only 1 data point exists.
+    Generate synthetic historical price data when only 1 real data point exists.
     
-    Models typical airline pricing patterns:
-    - Prices tend to decrease slightly 3-4 weeks before departure (early bird sales)
-    - Then gradually increase as departure approaches
-    - With random daily volatility of 3-8%
+    Models realistic airline pricing patterns:
+    - Prices tend to be highest 30 days out (early booking premium)
+    - Decrease to a minimum around 14-21 days (sweet spot)
+    - Rise sharply in the last 7 days (last-minute urgency)
+    - Daily volatility of 5-12%
     """
     if current_price <= 0:
         return []
@@ -82,26 +83,30 @@ def generate_synthetic_historical_data(current_price: float, days_back: int = 30
     historical = []
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     
-    base_price = current_price * 1.15  # Start slightly higher (30 days ago)
+    # Strong U-curve: highest at start, dips in middle, rises near end
+    base_price = current_price * 1.25  # 30 days ago price was roughly 25% higher
     
     for i in range(days_back, 0, -1):
         d = today - timedelta(days=i)
         days_from_start = days_back - i
+        day_ratio = days_from_start / days_back  # 0.0 (30 days ago) to 1.0 (today)
         
-        # Typical airline pricing curve: slowly decreasing then increasing
-        # Use a U-shaped curve with minimum around 14-21 days before departure
-        day_factor = (days_from_start - 14) / 14  # -1 to +1 range
-        trend = base_price * (0.05 * day_factor**2 - 0.02)  # Small U-curve
+        # U-curve: minimum around day 21 (70% through the period)
+        t = day_ratio - 0.7  # -0.7 to +0.3 range
+        trend_factor = t * t * 3.0 - 0.15  # Parabola with clear dip
         
-        # Add random volatility (3-8%)
-        volatility = random.uniform(0.03, 0.08)
-        noise = base_price * volatility * random.choice([-1, 1])
+        trend_price = base_price * (1.0 + trend_factor)
         
-        avg_price = base_price + trend + noise
-        avg_price = max(current_price * 0.5, min(current_price * 2.0, avg_price))
+        # Add meaningful daily volatility (5-12%)
+        volatility = random.uniform(0.05, 0.12)
+        noise = trend_price * volatility * random.choice([-1, 1])
         
-        min_price = avg_price * random.uniform(0.85, 0.95)
-        max_price = avg_price * random.uniform(1.05, 1.20)
+        avg_price = trend_price + noise
+        avg_price = max(current_price * 0.45, min(current_price * 2.2, avg_price))
+        
+        # Realistic min/max spread
+        min_price = avg_price * random.uniform(0.82, 0.95)
+        max_price = avg_price * random.uniform(1.05, 1.25)
         
         historical.append({
             "date": d.strftime("%Y-%m-%d"),
@@ -111,6 +116,59 @@ def generate_synthetic_historical_data(current_price: float, days_back: int = 30
         })
     
     return historical
+
+
+def rule_based_forecast(
+    prices: List[float],
+    days_ahead: int,
+) -> Dict:
+    """
+    Rule-based forecast for when we have < 3 real data points.
+    Airlines typically raise prices as departure approaches:
+    - 30-14 days out: stable or slightly decreasing
+    - 14-7 days out: gradual increase (~3-5%)
+    - 7-3 days out: moderate increase (~5-10%)
+    - 3-0 days out: sharp increase (~10-30%)
+    """
+    current = prices[-1]
+    
+    # Model: prices increase roughly 0.3% per day from now until departure
+    # with acceleration in the last week
+    forecast, lower, upper = [], [], []
+    for day in range(1, days_ahead + 1):
+        days_left = days_ahead - day + 1
+        if days_left <= 3:
+            daily_rate = 0.008  # 0.8% per day (last 3 days)
+        elif days_left <= 7:
+            daily_rate = 0.004  # 0.4% per day
+        elif days_left <= 14:
+            daily_rate = 0.002  # 0.2% per day
+        else:
+            daily_rate = 0.001  # 0.1% per day
+        
+        f = current * (1 + daily_rate) ** day
+        forecast.append(round(f, 0))
+        
+        # Confidence: ±10% for today, widening to ±25% at departure
+        margin = current * (0.10 + 0.15 * (day / days_ahead))
+        lower.append(round(max(current * 0.5, f - margin), 0))
+        upper.append(round(min(current * 2.0, f + margin), 0))
+    
+    # Generate a simulated historical curve for chart continuity
+    hist_curve = []
+    for i in range(30, 0, -1):
+        # Historical curve: higher at -30 days, dipping to current
+        ratio = i / 30
+        h = current * (0.85 + 0.30 * ratio * ratio)  # U-curve: 115% of current at 30d ago
+        hist_curve.append(round(h, 0))
+    
+    return {
+        "forecast": forecast,
+        "lower": lower,
+        "upper": upper,
+        "model": "Rule-Based (pricing pattern)",
+        "hist_curve": hist_curve,
+    }
 
 
 def arima_forecast(
@@ -160,12 +218,14 @@ def arima_forecast(
             forecast_price = current_price + projected_diff * day
             forecast_price = max(0, forecast_price)
             
-            # Confidence interval widens with time
+            # Confidence interval widens with time but capped to avoid absurd ranges
             se = std_diff * math.sqrt(day) * 1.5
-            z_95 = 1.96  # 95% CI
+            # Cap the standard error to 40% of forecast price to prevent wild CIs
+            se = min(se, forecast_price * 0.4) if forecast_price > 0 else se
+            z_95 = 1.96
             
-            lower = max(0, forecast_price - z_95 * se)
-            upper = forecast_price + z_95 * se
+            lower = max(current_price * 0.3, forecast_price - z_95 * se)  # Floor at 30% of current
+            upper = min(current_price * 2.5, forecast_price + z_95 * se)  # Ceiling at 250%
             
             forecasts.append(round(forecast_price, 0))
             lower_bounds.append(round(lower, 0))
@@ -341,8 +401,13 @@ def generate_prediction_chart(
             "days_until_departure": days_until_departure,
         }
     
-    # Run prediction model
-    prediction_result = arima_forecast(valid_prices, days_until_departure)
+    # Run prediction model - use rule-based for scarce data, ARIMA for rich data
+    if real_data_points < 3:
+        prediction_result = rule_based_forecast(valid_prices, days_until_departure)
+        # Override hist_prices with the smooth U-curve for better chart visuals
+        hist_prices = prediction_result.get("hist_curve", hist_prices)
+    else:
+        prediction_result = arima_forecast(valid_prices, days_until_departure)
     
     # Generate future dates
     future_dates = []
@@ -353,9 +418,15 @@ def generate_prediction_chart(
     # Key time nodes
     current_price = valid_prices[-1] if valid_prices else 0
     predicted_min = min(prediction_result["forecast"]) if prediction_result["forecast"] else current_price
+    predicted_max = max(prediction_result["forecast"]) if prediction_result["forecast"] else current_price
     predicted_min_idx = prediction_result["forecast"].index(predicted_min) if prediction_result["forecast"] else 0
     predicted_min_date = future_dates[predicted_min_idx] if predicted_min_idx < len(future_dates) else ""
     historical_min = min(valid_prices) if valid_prices else 0
+    
+    # Detect trend direction for recommendation
+    trend_up = predicted_max > current_price * 1.03  # More than 3% increase
+    trend_down = predicted_min < current_price * 0.97  # More than 3% decrease
+    trend_str = "↗上涨" if trend_up else ("↘下降" if trend_down else "→平稳")
     
     # Historical data matching future dates (for chart continuity)
     all_dates = hist_dates + future_dates
@@ -435,45 +506,44 @@ def generate_prediction_chart(
             "predicted_min_date": predicted_min_date,
             "days_until_departure": days_until_departure,
         },
-        "recommendation": _generate_recommendation(current_price, predicted_min, days_until_departure, real_data_points),
+        "recommendation": _generate_recommendation(current_price, predicted_min,
+            predicted_max, trend_str, days_until_departure, real_data_points),
     }
 
 
-def _generate_recommendation(current_price: float, predicted_min: float, days_until_departure: int, data_points: int) -> str:
+def _generate_recommendation(current_price: float, predicted_min: float, predicted_max: float,
+                             trend_str: str, days_until_departure: int, data_points: int) -> str:
     """Generate a buy/wait recommendation based on prediction results."""
     if current_price <= 0 or predicted_min <= 0:
         return "暂无足够数据提供建议"
     
-    # Calculate price difference
-    price_diff_pct = ((current_price - predicted_min) / predicted_min) * 100 if predicted_min > 0 else 0
+    # Calculate trend magnitude
+    trend_pct = ((predicted_max - current_price) / current_price) * 100 if current_price > 0 else 0
+    drop_pct = ((current_price - predicted_min) / predicted_min) * 100 if predicted_min > 0 else 0
     
     if data_points < 3:
-        confidence = "低"
+        conf = "低"
         data_note = f"(基于 {data_points} 个真实数据点 + 模拟历史数据)"
     elif data_points < 10:
-        confidence = "中"
+        conf = "中"
         data_note = f"(基于 {data_points} 个真实数据点)"
     else:
-        confidence = "高"
+        conf = "高"
         data_note = f"(基于 {data_points} 个真实数据点)"
     
-    if days_until_departure <= 3:
-        if price_diff_pct > 5:
-            return f"⚡ 建议尽快购买 | 距起飞仅剩 {days_until_departure} 天，预测价格可能上涨 {price_diff_pct:.0f}% | 置信度{confidence} {data_note}"
-        else:
-            return f"✅ 价格合理 | 临近起飞，价格趋于稳定，当前价格接近预测最低 | 置信度{confidence} {data_note}"
-    elif days_until_departure <= 7:
-        if price_diff_pct > 10:
-            return f"⏳ 建议观望 | 预测 {days_until_departure} 天内可能降价 {price_diff_pct:.0f}%，但临近起飞风险增加 | 置信度{confidence} {data_note}"
-        else:
-            return f"✅ 价格适中 | 如有出行计划可考虑购买，价格大幅下跌可能性低 | 置信度{confidence} {data_note}"
-    elif days_until_departure <= 14:
-        if price_diff_pct > 15:
-            return f"⏳ 建议等待 | 预测 {days_until_departure} 天内可能降价 {price_diff_pct:.0f}%，建议设置降价提醒 | 置信度{confidence} {data_note}"
-        else:
-            return f"📊 价格稳定 | 如有计划可购买，或等待更好时机 | 置信度{confidence} {data_note}"
-    else:
-        if price_diff_pct > 20:
-            return f"💰 建议等待 | 预测存在 {price_diff_pct:.0f}% 的降价空间，建议设置降价提醒并关注 | 置信度{confidence} {data_note}"
-        else:
-            return f"📊 价格平稳 | {days_until_departure} 天内价格波动较小，建议提前关注 | 置信度{confidence} {data_note}"
+    # Upward trend: recommend buying now before prices rise
+    if trend_str == "↗上涨" and trend_pct > 3:
+        if days_until_departure <= 3:
+            return f"⚡ 紧急：建议立即购买 | 趋势{trend_str} {trend_pct:.0f}% | 置信度{conf} {data_note}"
+        return f"⚡ 建议尽早购买 | 趋势{trend_str} {trend_pct:.0f}%，临近起飞可能加速上涨 | 置信度{conf} {data_note}"
+    if trend_str == "↗上涨":
+        return f"📊 趋势{trend_str} | 价格温和上涨中，建议择机购买 | 置信度{conf} {data_note}"
+    
+    # Downward trend: suggest waiting
+    if trend_str == "↘下降" and drop_pct > 10:
+        return f"⏳ 建议等待 | 趋势{trend_str} {drop_pct:.0f}%，降价空间较大 | 置信度{conf} {data_note}"
+    if trend_str == "↘下降":
+        return f"📊 趋势{trend_str} | 可观望，降价幅度较小 | 置信度{conf} {data_note}"
+    
+    # Fallback for no trend
+    return f"📊 价格趋势{trend_str} | {days_until_departure} 天内波动较小，建议提前关注 | 置信度{conf} {data_note}"
