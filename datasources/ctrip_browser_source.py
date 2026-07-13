@@ -226,6 +226,51 @@ class CtripBrowserSource(BaseDataSource):
             logger.info(f"CtripBrowserSource: Navigating to flight list page...")
             self._page.goto(search_url, wait_until="domcontentloaded")
             self._page.wait_for_timeout(15000)
+
+            # Try POST to flightListSearchForH5 directly to get time data
+            try:
+                post_data = {
+                    "searchitem": [{
+                        "dccode": dep_code,
+                        "dcid": dep_id,
+                        "accode": arr_code,
+                        "acidx": arr_id,
+                        "dtime": query.departure_date,
+                        "segno": 1,
+                        "flag": 0,
+                        "extend": "",
+                        "sgrade": 0,
+                    }],
+                    "seat": 0,
+                    "trptpe": 1,
+                    "segno": 1,
+                    "flag": 0,
+                    "itflg": 37748736,
+                    "idlst": [],
+                    "head": {"cid": "09031176310318893154", "ctok": "", "cver": "9999",
+                             "lang": "01", "sid": "8888", "syscode": "09", "auth": "",
+                             "extension": []},
+                }
+                # Try the POST endpoint for detailed flight info
+                resp = self._page.evaluate("""
+                    async (data) => {
+                        try {
+                            const r = await fetch('/restapi/soa2/14488/flightListSearchForH5', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(data)
+                            });
+                            return await r.json();
+                        } catch (e) { return null; }
+                    }
+                """, post_data)
+                if resp and isinstance(resp, dict) and resp.get("fltitem"):
+                    flt = resp["fltitem"]
+                    if isinstance(flt, list) and flt and not flight_data:
+                        flight_data = flt
+                        logger.info(f"CtripBrowserSource: POST got {len(flt)} flights with time data")
+            except Exception as e:
+                logger.warning(f"CtripBrowserSource: POST attempt failed: {e}")
         finally:
             self._page.remove_listener("response", on_response)
             self._page.remove_listener("request", on_request)

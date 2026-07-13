@@ -332,13 +332,71 @@ async function deleteQuery(queryId) {
 }
 
 async function searchNow(queryId) {
-    toast("正在搜索多平台航班价格...", "");
-    try {
-        const result = await api(`/api/queries/${queryId}/search`, "POST");
-        showSearchResults(result, queryId);
-        loadQueries();
-        refreshDashboard();
-    } catch (e) { toast("搜索失败: " + e.message, "error"); }
+    const modal = document.getElementById("searchResultsModal");
+    const content = document.getElementById("searchResults");
+    if (modal && content) {
+        modal.style.display = "flex";
+        content.innerHTML = `
+            <div class="search-progress">
+                <div class="spinner"></div>
+                <h3>正在搜索多平台航班价格</h3>
+                <div class="progress-steps">
+                    <div class="step active" id="step-1">
+                        <span class="step-icon">1</span>
+                        <span class="step-text">正在启动携程浏览器抓取真实数据...</span>
+                    </div>
+                    <div class="step" id="step-2">
+                        <span class="step-icon">2</span>
+                        <span class="step-text">抓取航班日历数据（约 15-20 秒）</span>
+                    </div>
+                    <div class="step" id="step-3">
+                        <span class="step-icon">3</span>
+                        <span class="step-text">生成 27 个平台比价数据</span>
+                    </div>
+                    <div class="step" id="step-4">
+                        <span class="step-icon">4</span>
+                        <span class="step-text">完成，正在渲染结果...</span>
+                    </div>
+                </div>
+                <div class="progress-hint">⏱ 预计耗时 20-30 秒（包含真实数据抓取）</div>
+            </div>
+        `;
+        // Animate progress steps while waiting
+        const timers = [
+            setTimeout(() => {
+                const s2 = document.getElementById("step-2");
+                if (s2) s2.classList.add("active");
+            }, 3000),
+            setTimeout(() => {
+                const s3 = document.getElementById("step-3");
+                if (s3) s3.classList.add("active");
+            }, 18000),
+        ];
+        try {
+            const result = await api(`/api/queries/${queryId}/search`, "POST");
+            clearTimeout(timers[0]);
+            clearTimeout(timers[1]);
+            const s4 = document.getElementById("step-4");
+            if (s4) s4.classList.add("active");
+            showSearchResults(result, queryId);
+            loadQueries();
+            refreshDashboard();
+        } catch (e) {
+            clearTimeout(timers[0]);
+            clearTimeout(timers[1]);
+            content.innerHTML = `<div class="empty-state"><p>搜索失败: ${e.message}</p></div>`;
+            toast("搜索失败: " + e.message, "error");
+        }
+    } else {
+        // Fallback for places without searchResults modal
+        toast("正在搜索多平台航班价格...", "");
+        try {
+            const result = await api(`/api/queries/${queryId}/search`, "POST");
+            showSearchResults(result, queryId);
+            loadQueries();
+            refreshDashboard();
+        } catch (e) { toast("搜索失败: " + e.message, "error"); }
+    }
 }
 
 // ── Price Prediction ─────────────────────────────────────────
@@ -534,18 +592,18 @@ function renderFlightCard(f) {
                 </div>
                 <div class="flight-time-info">
                     <div class="flight-time-block">
-                        <div class="flight-time">${f.departure_time}</div>
+                        <div class="flight-time">${f.departure_time || "时间待确认"}</div>
                         <div class="flight-airport">${f.departure_airport}</div>
                     </div>
                     <div class="flight-duration-block">
-                        <div class="flight-duration">${f.duration}</div>
+                        <div class="flight-duration">${f.duration || "—"}</div>
                         <div class="flight-duration-line"></div>
                         <div class="flight-duration">
                             <span class="stops-badge ${f.stops === 0 ? 'direct' : 'transfer'}">${f.stops === 0 ? '直飞' : f.stops + '中转'}</span>
                         </div>
                     </div>
                     <div class="flight-time-block">
-                        <div class="flight-time">${f.arrival_time}</div>
+                        <div class="flight-time">${f.arrival_time || "—"}</div>
                         <div class="flight-airport">${f.arrival_airport}</div>
                     </div>
                 </div>

@@ -149,10 +149,12 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             return jsonify({"error": "Query not found"}), 404
         prices = monitor.check_query(q)
 
-        # Group by flight (airline + flight_no + dep_time) to show multi-platform comparison
+        # Group by flight: prefer (airline + flight_no + departure_time),
+        # fall back to (airline + flight_no) when time is empty (e.g., calendar API)
         flight_groups = {}
         for p in prices:
-            key = f"{p.airline}_{p.flight_no}_{p.departure_time}"
+            time_part = p.departure_time or "no-time"
+            key = f"{p.airline}_{p.flight_no}_{time_part}"
             if key not in flight_groups or p.price < flight_groups[key]["price"]:
                 flight_groups[key] = {
                     "airline": p.airline,
@@ -170,12 +172,18 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
                 }
 
         # Build platform price comparison for each flight
+        # Dedup: keep only one price per (source, price) to avoid 10× duplicates
         flight_list = []
         for key, base in flight_groups.items():
-            # Find all platform prices for this flight
             platform_prices = []
+            seen_keys = set()
             for p in prices:
-                if f"{p.airline}_{p.flight_no}_{p.departure_time}" == key:
+                time_part = p.departure_time or "no-time"
+                if f"{p.airline}_{p.flight_no}_{time_part}" == key:
+                    dedup_key = f"{p.source}_{p.price}"
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
                     platform_prices.append({
                         "source": p.source,
                         "price": p.price,
@@ -185,7 +193,8 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
                         "platform_color": PURCHASE_PLATFORMS.get(p.source, {}).get("color", "#666"),
                     })
             platform_prices.sort(key=lambda x: x["price"])
-            base["platform_prices"] = platform_prices
+            # Cap platform list at 6 to keep UI clean
+            base["platform_prices"] = platform_prices[:6]
             flight_list.append(base)
 
         flight_list.sort(key=lambda x: x["price"])
