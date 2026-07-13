@@ -165,6 +165,41 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         prices = monitor.check_query(q)
 
         # ── Canonical flight selection ──
+        # When ctrip_browser has real data, use it as the base flight list.
+        # Discard mock flights that don't match any real flight_no.
+        real_prices = [p for p in prices if p.source == "ctrip_browser"]
+        if real_prices:
+            mock_prices = [p for p in prices if p.source != "ctrip_browser"]
+            real_ids = {f"{p.airline}_{p.flight_no}" for p in real_prices}
+            matched_mock = [p for p in mock_prices
+                          if f"{p.airline}_{p.flight_no}" in real_ids]
+            prices = real_prices + matched_mock
+            logger.info(f"search_now: canonical={len(real_prices)} real flights, "
+                       f"matched={len(matched_mock)}/{len(mock_prices)} mock records")
+
+            # Backfill times from real-world flight schedule database
+            from datasources.flight_schedules import lookup_flight_schedule, get_aircraft_for_flight
+            backfilled = 0
+            for p in prices:
+                if not p.departure_time:
+                    sched = lookup_flight_schedule(p.flight_no)
+                    if sched:
+                        p.departure_time = sched["dep"]
+                        p.arrival_time = sched["arr"]
+                        p.duration = f"{sched['duration_min'] // 60}h{sched['duration_min'] % 60}m"
+                        if not p.aircraft:
+                            p.aircraft = sched["aircraft"]
+                        backfilled += 1
+                    else:
+                        # Fallback: estimate based on city pair (assume 2.5h for domestic)
+                        if not p.aircraft:
+                            p.aircraft = get_aircraft_for_flight(p.flight_no)
+                        if not p.duration:
+                            p.duration = "2h30m"
+            if backfilled:
+                logger.info(f"search_now: backfilled times for {backfilled} flights")
+
+        # ── Canonical flight selection ──
         # When ctrip_browser has real data, use it as canonical. Discard
         # mock flights that don't match any real flight_no (they had random
         # flight numbers). Keep only matching mock records for platform prices.
