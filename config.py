@@ -183,6 +183,12 @@ PURCHASE_PLATFORMS = {
         "icon": "🇭🇰",
         "url": "https://www.cathaypacific.com/flights/jp/book?dep={dep_code}&arr={arr_code}&date={date}",
     },
+    "thai": {
+        "name": "泰国航空",
+        "color": "#4a1e87",
+        "icon": "🇹🇭",
+        "url": "https://www.thaiairways.com/book?from={dep_code}&to={arr_code}&depart={date}",
+    },
     "airfrance": {
         "name": "法国航空",
         "color": "#002157",
