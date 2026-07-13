@@ -420,10 +420,11 @@ async function showPricePrediction(queryId) {
 }
 
 function renderPredictionChart(data) {
-    if (window.predictionChart) {
+    // Safely destroy previous chart instance
+    if (window.predictionChart && typeof window.predictionChart.destroy === "function") {
         window.predictionChart.destroy();
-        window.predictionChart = null;
     }
+    window.predictionChart = null;
     
     // Use chart_data from backend (preferred) or fall back to chart
     const chartData = data.chart_data || data.chart || {};
@@ -684,7 +685,7 @@ async function loadTrendChart() {
 
 function renderChart(history) {
     const ctx = document.getElementById("priceChart").getContext("2d");
-    if (priceChart) priceChart.destroy();
+    if (priceChart && typeof priceChart.destroy === "function") priceChart.destroy();
 
     const labels = history.map(h => formatTime(h.recorded_at, true));
     const minData = history.map(h => h.min_price);
