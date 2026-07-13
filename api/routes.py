@@ -6,11 +6,10 @@ import logging
 import os
 import csv
 import io
-import random
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, Response
 from core.database import Database
-from core.models import SearchQuery, FlightPrice, PriceAlert
+from core.models import SearchQuery, PriceAlert
 from core.monitor import PriceMonitor
 from core.price_prediction import generate_prediction_chart
 from config import (
@@ -162,177 +161,15 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         q = db.get_query(query_id)
         if not q:
             return jsonify({"error": "Query not found"}), 404
+
+        # 1. Trigger crawler/monitor to get latest prices
         prices = monitor.check_query(q)
 
-        # Determine route type
-        intl = False
-        from datasources.mock_source import is_international_route
-        try:
-            intl = is_international_route(q.departure, q.destination)
-        except Exception:
-            pass
+        # 2. Dispatch to Aggregator for O(N) high-speed processing
+        from core.aggregator import FlightAggregator
+        result = FlightAggregator.process_search_results(q, prices)
 
-        # Choose the right set of platforms for cross-platform price generation
-        dom_platforms = ["ctrip", "qunar", "fliggy", "tongcheng",
-                        "spring", "juneyao", "airchina", "csair", "ceair", "hainan"]
-        intl_platforms = ["tripcom", "skyscanner", "googleflights", "kayak", "expedia"]
-        plat_keys = intl_platforms if intl else dom_platforms
-
-        # Check if ctrip_browser contributed real data
-        real_prices = [p for p in prices if p.source == "ctrip_browser"]
-        if real_prices:
-            # Real flights exist — keep them all, enrich with cross-platform prices
-            logger.info(f"search_now: {len(real_prices)} ctrip flights (canonical)")
-            mock_prices = [p for p in prices if p.source != "ctrip_browser"]
-            # Keep mock flights that match real flight numbers
-            real_ids = {f"{p.airline}_{p.flight_no}" for p in real_prices}
-            matched_mock = [p for p in mock_prices
-                          if f"{p.airline}_{p.flight_no}" in real_ids]
-            prices = real_prices + matched_mock
-
-            # Backfill times from flight schedule database
-            from datasources.flight_schedules import lookup_flight_schedule, get_aircraft_for_flight
-            backfilled = 0
-            for p in prices:
-                if not p.departure_time:
-                    sched = lookup_flight_schedule(p.flight_no)
-                    if sched:
-                        p.departure_time = sched["dep"]
-                        p.arrival_time = sched["arr"]
-                        p.duration = f"{sched['duration_min'] // 60}h{sched['duration_min'] % 60}m"
-                        if not p.aircraft:
-                            p.aircraft = sched["aircraft"]
-                        backfilled += 1
-                    else:
-                        if not p.aircraft:
-                            p.aircraft = get_aircraft_for_flight(p.flight_no)
-
-            # Generate cross-platform prices for EACH real flight
-            extra_prices = []
-            for rp in real_prices:
-                flight_key = f"{rp.airline}_{rp.flight_no}"
-                seen_plats = {pp.source for pp in prices
-                             if f"{pp.airline}_{pp.flight_no}" == flight_key}
-                for pk in plat_keys:
-                    if pk in seen_plats or pk == "ctrip_browser":
-                        continue
-                    # Wider price spread: 85%-140% of base price
-                    variation = 0.85 + random.random() * 0.55
-                    plat_price = max(50, round(rp.price * variation / 10) * 10)
-                    pi = PURCHASE_PLATFORMS.get(pk, {})
-                    url = ""
-                    try:
-                        url = pi.get("url", "").format(
-                            dep=q.departure, arr=q.destination,
-                            date=q.departure_date, dep_code="", arr_code="")
-                    except (KeyError, Exception):
-                        pass
-                    extra_prices.append(FlightPrice(
-                        query_id=rp.query_id, airline=rp.airline,
-                        flight_no=rp.flight_no, aircraft=rp.aircraft,
-                        departure_time=rp.departure_time,
-                        arrival_time=rp.arrival_time,
-                        departure_airport=rp.departure_airport,
-                        arrival_airport=rp.arrival_airport,
-                        duration=rp.duration, stops=rp.stops,
-                        price=plat_price, cabin_class=rp.cabin_class,
-                        source=pk, recorded_at=rp.recorded_at,
-                        purchase_url=url,
-                    ))
-            if extra_prices:
-                prices = list(prices) + extra_prices
-                logger.info(f"search_now: +{len(extra_prices)} cross-platform prices")
-        else:
-            # No ctrip_browser data — pure mock mode (fallback)
-            logger.info(f"search_now: mock mode ({len(prices)} records)")
-
-        # Build time index from records that HAVE times
-        times_by_flight = {}
-        for p in prices:
-            if p.departure_time and p.arrival_time:
-                key = f"{p.airline}_{p.flight_no}"
-                if key not in times_by_flight:
-                    times_by_flight[key] = dict(
-                        departure_time=p.departure_time, arrival_time=p.arrival_time,
-                        aircraft=p.aircraft, stops=p.stops, duration=p.duration,
-                        departure_airport=p.departure_airport,
-                        arrival_airport=p.arrival_airport,
-                    )
-
-        # Group flights by airline+flight_no+time (or "no-time" fallback)
-        flight_groups = {}
-        for p in prices:
-            bf = times_by_flight.get(f"{p.airline}_{p.flight_no}", {})
-            tp = p.departure_time or bf.get("departure_time") or "no-time"
-            key = f"{p.airline}_{p.flight_no}_{tp}"
-            if key not in flight_groups or p.price < flight_groups[key]["price"]:
-                flight_groups[key] = dict(
-                    airline=p.airline, flight_no=p.flight_no,
-                    aircraft=p.aircraft or bf.get("aircraft", ""),
-                    departure_time=p.departure_time or bf.get("departure_time", ""),
-                    arrival_time=p.arrival_time or bf.get("arrival_time", ""),
-                    departure_airport=p.departure_airport or bf.get("departure_airport", ""),
-                    arrival_airport=p.arrival_airport or bf.get("arrival_airport", ""),
-                    duration=p.duration or bf.get("duration", ""),
-                    stops=p.stops or bf.get("stops", 0),
-                    price=p.price, source=p.source,
-                    purchase_url=p.purchase_url,
-                )
-
-        # Build platform price comparison per flight
-        flight_list = []
-        for key, base in flight_groups.items():
-            pp_list = []
-            seen = set()
-            for p in prices:
-                bf = times_by_flight.get(f"{p.airline}_{p.flight_no}", {})
-                tp = p.departure_time or bf.get("departure_time") or "no-time"
-                if f"{p.airline}_{p.flight_no}_{tp}" != key:
-                    continue
-                dk = f"{p.source}_{p.price}"
-                if dk in seen:
-                    continue
-                seen.add(dk)
-                pp_list.append(dict(
-                    source=p.source, price=p.price,
-                    purchase_url=p.purchase_url,
-                    platform_name=PURCHASE_PLATFORMS.get(p.source, {}).get("name", p.source),
-                    platform_icon=PURCHASE_PLATFORMS.get(p.source, {}).get("icon", ""),
-                    platform_color=PURCHASE_PLATFORMS.get(p.source, {}).get("color", "#666"),
-                ))
-            pp_list.sort(key=lambda x: x["price"])
-            base["platform_prices"] = pp_list[:8]  # Show up to 8 platforms
-            flight_list.append(base)
-
-        # Deduplicate by airline+flight_no (prefer records with time data)
-        final = {}
-        for f in flight_list:
-            mk = f"{f['airline']}_{f['flight_no']}"
-            if mk not in final:
-                final[mk] = f
-            else:
-                e = final[mk]
-                if not e.get("departure_time") and f.get("departure_time"):
-                    for attr in ("departure_time", "arrival_time", "aircraft",
-                                 "duration", "departure_airport", "arrival_airport"):
-                        if f.get(attr):
-                            e[attr] = f[attr]
-                sp = {x["source"] for x in e.get("platform_prices", [])}
-                for pf in f.get("platform_prices", []):
-                    if pf["source"] not in sp:
-                        e.setdefault("platform_prices", []).append(pf)
-                        sp.add(pf["source"])
-                if f["price"] < e["price"]:
-                    e["price"] = f["price"]
-        flight_list = sorted(final.values(), key=lambda x: x["price"])
-
-        return jsonify({
-            "count": len(flight_list),
-            "total_records": len(prices),
-            "min_price": min((p.price for p in prices), default=0),
-            "platforms": list(set(p.source for p in prices)),
-            "flights": flight_list[:30],
-        })
+        return jsonify(result)
 
     @app.route("/api/queries/<int:query_id>/prices", methods=["GET"])
     def get_latest_prices(query_id):

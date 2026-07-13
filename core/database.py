@@ -473,6 +473,25 @@ class Database:
             label=row["label"],
         )
 
+    def prune_expired_records(self, days_old: int = 45):
+        """Delete historical prices older than X days to prevent SQLite database bloat."""
+        conn = self._get_conn()
+        try:
+            from datetime import timedelta
+            cutoff_date = (datetime.now() - timedelta(days=days_old)).isoformat()
+            cur = conn.execute(
+                "DELETE FROM price_records WHERE recorded_at < ?",
+                (cutoff_date,)
+            )
+            conn.commit()
+            logger.info(f"Database Pruning: Removed {cur.rowcount} old price records.")
+            return cur.rowcount
+        except Exception as e:
+            logger.error(f"Pruning error: {e}")
+            return 0
+        finally:
+            conn.close()
+
     def _row_to_price(self, row) -> FlightPrice:
         return FlightPrice(
             id=row["id"], query_id=row["query_id"], airline=row["airline"],

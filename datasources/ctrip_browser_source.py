@@ -1,11 +1,7 @@
 """
-Flight Monitor - Ctrip Browser Data Source
+Flight Monitor - Ctrip Browser Data Source (Enhanced)
 Uses Playwright + real Chrome browser to call Ctrip H5 APIs.
-This bypasses anti-scraping by using a valid browser session.
-
-Strategy: Navigate to flight list page with route params, intercept the
-flightListSearchForH5 API response to extract full flight data (times, airline, price).
-Fallback to getLowestPriceCalendar for minimum daily prices.
+Features dynamic scrolling for full data loading and robust JSON extraction.
 """
 import json
 import logging
@@ -61,13 +57,10 @@ CITY_TO_CTRIP_ID = {
     "悉尼": ("SYD", "73"), "墨尔本": ("MEL", "259"),
 }
 
-# Old mapping for backward compat
 CITY_TO_IATA = {k: v[0] for k, v in CITY_TO_CTRIP_ID.items()}
 
 
 class CtripBrowserSource(BaseDataSource):
-    """Ctrip (携程) data source using Playwright browser session."""
-
     name = "ctrip_browser"
 
     def __init__(self):
@@ -81,7 +74,6 @@ class CtripBrowserSource(BaseDataSource):
         return HAS_PLAYWRIGHT
 
     def _ensure_browser(self):
-        """Lazy init browser. Re-creates if idle too long."""
         now = time.time()
         if self._browser and (now - self._last_used) > self._max_idle_seconds:
             logger.info("CtripBrowserSource: Browser idle too long, closing...")
@@ -91,10 +83,9 @@ class CtripBrowserSource(BaseDataSource):
         self._last_used = time.time()
 
     def _init_browser(self):
-        """Initialize browser session with stable headless mode."""
         if self._browser:
             return
-        
+
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(
             headless=True,
@@ -114,54 +105,35 @@ class CtripBrowserSource(BaseDataSource):
         self._context = self._browser.new_context(
             viewport={"width": 375, "height": 812},
             user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                      "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                      "Version/16.0 Mobile/15E148 Safari/604.1",
+                       "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                       "Version/16.0 Mobile/15E148 Safari/604.1",
             locale="zh-CN",
         )
-        # Visit homepage to establish session
         page = self._context.new_page()
         page.goto("https://m.ctrip.com/html5/flight/swift/", wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
-        page.close()  # warm-up page, not needed after session established
+        page.wait_for_timeout(3000)
+        page.close()
 
     def _close_browser(self):
         try:
-            if self._context:
-                self._context.close()
+            if self._context: self._context.close()
+            if self._browser: self._browser.close()
+            if self._playwright: self._playwright.stop()
         except Exception:
             pass
-        try:
-            if self._browser:
-                self._browser.close()
-        except Exception:
-            pass
-        try:
-            if self._playwright:
-                self._playwright.stop()
-        except Exception:
-            pass
-        self._browser = None
-        self._context = None
+        self._browser, self._context = None, None
 
     def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
-        """
-        Search flights by navigating to the flight list page and
-        intercepting the getLowestPriceCalendar / flightGloryList API responses.
-        Uses a fresh Playwright page per search to avoid state pollution.
-        """
         if not self.is_available():
             return []
 
         city_info = CITY_TO_CTRIP_ID.get(query.departure)
-        if not city_info:
-            logger.warning(f"CtripBrowserSource: Unknown city: {query.departure}")
-            return []
-        dep_code, dep_id = city_info
-
         city_info2 = CITY_TO_CTRIP_ID.get(query.destination)
-        if not city_info2:
-            logger.warning(f"CtripBrowserSource: Unknown city: {query.destination}")
+        if not city_info or not city_info2:
+            logger.warning("CtripBrowserSource: Unknown city mapping.")
             return []
+
+        dep_code, dep_id = city_info
         arr_code, arr_id = city_info2
 
         try:
@@ -170,95 +142,50 @@ class CtripBrowserSource(BaseDataSource):
             logger.error(f"CtripBrowserSource: Browser init failed: {e}")
             return []
 
-        # Use a fresh page per search to avoid state pollution
         page = self._context.new_page()
         try:
-            return self._do_search(page, query, dep_code, dep_id, arr_code, arr_id)
+            return self._do_search(page, query, dep_code, arr_code)
         finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+            page.close()
 
-    def _do_search(self, page, query, dep_code, dep_id, arr_code, arr_id):
-
-        flight_data = []
-
-        # Use route interception instead of response listener to catch ALL requests
-        all_urls = set()
+    def _do_search(self, page, query, dep_code, arr_code):
+        flight_data_map = {}
+        api_intercepted = False
 
         def on_response(response):
-            nonlocal flight_data, all_urls
+            nonlocal api_intercepted
             url = response.url
-            if response.status == 200:
-                all_urls.add(url[:200])
+            if response.status != 200:
+                return
 
-            if "flightListSearchForH5" in url and response.status == 200:
+            # Intercept both flightListSearchForH5 and flightGloryList (with times)
+            # Also keep getLowestPriceCalendar as fallback for flight count
+            if "flightListSearchForH5" in url or "flightGloryList" in url:
                 try:
                     data = response.json()
-                    flt_item = data.get("fltitem", [])
-                    if isinstance(flt_item, list) and flt_item:
-                        flight_data = flt_item
-                        logger.info(f"CtripBrowserSource: Intercepted {len(flt_item)} flights from flightList")
+                    raw_items = data.get("fltitem", []) or data.get("finfo", [])
+                    if raw_items and isinstance(raw_items, list) and len(raw_items) > 0:
+                        api_intercepted = True
+                        for item in raw_items:
+                            self._extract_flight(item, flight_data_map, dep_code, arr_code, query)
                 except Exception as e:
-                    logger.warning(f"CtripBrowserSource: Failed to parse flight list: {e}")
+                    logger.warning(f"CtripBrowserSource: Parse error on {url[:100]}: {e}")
 
-            if "flightGloryList" in url and response.status == 200:
-                try:
-                    data = response.json()
-                    finfo = data.get("finfo")
-                    if isinstance(finfo, list) and finfo:
-                        # finfo is the rich flight data with times!
-                        rich_flights = []
-                        for fi in finfo:
-                            if not isinstance(fi, dict):
-                                continue
-                            flight = {
-                                "price": fi.get("lowestPrice", 0) or fi.get("price", 0),
-                                "airlineName": fi.get("airlineName", ""),
-                                "flightNo": fi.get("flightNo", ""),
-                                "departureCityCode": fi.get("departureCityCode", ""),
-                                "arrivalCityCode": fi.get("arrivalCityCode", ""),
-                                "departureTime": fi.get("departureTime", ""),
-                                "arrivalTime": fi.get("arrivalTime", ""),
-                                "aircraft": fi.get("aircraftName", ""),
-                            }
-                            if flight["price"] > 0 and flight["flightNo"]:
-                                rich_flights.append(flight)
-                        if rich_flights and not flight_data:
-                            flight_data = rich_flights
-                            logger.info(f"CtripBrowserSource: flightGloryList got {len(rich_flights)} flights WITH TIMES")
-                except Exception as e:
-                    logger.warning(f"CtripBrowserSource: flightGloryList parse failed: {e}")
-
-            if "getLowestPriceCalendar" in url and response.status == 200:
+            elif "getLowestPriceCalendar" in url:
                 try:
                     data = response.json()
                     raw = data.get("data", "")
                     if raw:
                         flights = json.loads(raw) if isinstance(raw, str) else raw
-                        if isinstance(flights, list):
-                            # Save calendar data for fallback if flightList data is unavailable
-                            cal_flights = [{"price": f.get("price", 0), "airlineName": f.get("airlineName", ""),
-                                          "flightNo": f.get("flightNo", ""), "departureCityCode": f.get("departureCityCode", ""),
-                                          "arrivalCityCode": f.get("arrivalCityCode", "")} for f in flights]
-                            if not flight_data:
-                                flight_data = cal_flights
-                            logger.info(f"CtripBrowserSource: Intercepted {len(flights)} flights from calendar API")
+                        if isinstance(flights, list) and flights:
+                            for item in flights:
+                                self._extract_flight(item, flight_data_map, dep_code, arr_code, query)
                 except Exception as e:
                     logger.warning(f"CtripBrowserSource: Calendar parse failed: {e}")
 
         page.on("response", on_response)
 
-        # Also log all XHR requests to find the flight list API
-        def on_request(request):
-            url = request.url
-            if "restapi/soa2" in url or "flightList" in url or "flightlist" in url.lower():
-                all_urls.add(f"REQ:{url[:250]}")
-        page.on("request", on_request)
-
         try:
-            # Navigate to flight list page with route params
             dep_enc = quote(query.departure)
             arr_enc = quote(query.destination)
             search_url = (
@@ -267,177 +194,143 @@ class CtripBrowserSource(BaseDataSource):
                 f"&ddate={query.departure_date}&cabin=Y_S&adult=1&child=0&infant=0"
             )
 
-            logger.info(f"CtripBrowserSource: Navigating to flight list page...")
+            logger.info("CtripBrowserSource: Loading flight list...")
             page.goto(search_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(15000)
+            page.wait_for_timeout(3000)
 
-            # Try POST to flightListSearchForH5 directly to get time data
-            try:
-                post_data = {
-                    "searchitem": [{
-                        "dccode": dep_code,
-                        "dcid": dep_id,
-                        "accode": arr_code,
-                        "acidx": arr_id,
-                        "dtime": query.departure_date,
-                        "segno": 1,
-                        "flag": 0,
-                        "extend": "",
-                        "sgrade": 0,
-                    }],
-                    "seat": 0,
-                    "trptpe": 1,
-                    "segno": 1,
-                    "flag": 0,
-                    "itflg": 37748736,
-                    "idlst": [],
-                    "head": {"cid": "09031176310318893154", "ctok": "", "cver": "9999",
-                             "lang": "01", "sid": "8888", "syscode": "09", "auth": "",
-                             "extension": []},
-                }
-                # Try the POST endpoint for detailed flight info
-                resp = page.evaluate("""
-                    async (data) => {
-                        try {
-                            const r = await fetch('/restapi/soa2/14488/flightListSearchForH5', {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify(data)
-                            });
-                            return await r.json();
-                        } catch (e) { return null; }
-                    }
-                """, post_data)
-                if resp and isinstance(resp, dict) and resp.get("fltitem"):
-                    flt = resp["fltitem"]
-                    if isinstance(flt, list) and flt and not flight_data:
-                        flight_data = flt
-                        logger.info(f"CtripBrowserSource: POST got {len(flt)} flights with time data")
-            except Exception as e:
-                logger.warning(f"CtripBrowserSource: POST attempt failed: {e}")
+            # Dynamic scroll to trigger lazy loading
+            last_height = page.evaluate("document.body.scrollHeight")
+            for _ in range(5):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                try:
+                    page.wait_for_response(
+                        lambda r: "flightListSearch" in r.url and r.status == 200,
+                        timeout=2000)
+                except Exception:
+                    page.wait_for_timeout(1000)
+
+                new_height = page.evaluate("document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+
         finally:
             page.remove_listener("response", on_response)
-            page.remove_listener("request", on_request)
 
-        if not flight_data:
-            logger.warning("CtripBrowserSource: No flight list data intercepted")
-        # Always log intercepted URLs for debugging
-        flight_urls = [u for u in all_urls if "flight" in u.lower() or "search" in u.lower() or "api" in u.lower() or "json" in u.lower()]
-        if flight_urls:
-            logger.info(f"CtripBrowserSource: Intercepted {len(all_urls)} URLs, {len(flight_urls)} flight-related:")
-            for u in sorted(flight_urls)[:8]:
-                logger.info(f"  {u}")
+        if not api_intercepted:
+            logger.info("CtripBrowserSource: Timed flights not available, "
+                       "using calendar data as fallback")
 
-        # Convert API response to FlightPrice objects
+        results = list(flight_data_map.values())
+        logger.info(f"CtripBrowserSource: Parsed {len(results)} distinct flights.")
+        return results
+
+    def _extract_flight(self, item: dict, data_map: dict,
+                       default_dep: str, default_arr: str, query: SearchQuery):
+        """Robust flight extraction with bsname-first airport names."""
+        if not isinstance(item, dict):
+            return
+
+        flight_no = ""
+        airline_name = ""
+        dep_airport = ""
+        arr_airport = ""
+        dep_time = ""
+        arr_time = ""
+        aircraft = ""
+        stops = 0
+        lowest_price = 0
+
+        # ---- Parse flightListSearchForH5 / flightGloryList structure ----
+        mutilstn = item.get("mutilstn", [])
+        if mutilstn and isinstance(mutilstn, list):
+            seg = mutilstn[0]
+            if isinstance(seg, dict):
+                basinfo = seg.get("basinfo", {})
+                dportinfo = seg.get("dportinfo", {})
+                aportinfo = seg.get("aportinfo", {})
+                dateinfo = seg.get("dateinfo", {})
+                craftinfo = seg.get("craftinfo", {})
+
+                flight_no = basinfo.get("flgno", "")
+                airline_name = basinfo.get("airlineName") or basinfo.get("aircode", "")
+
+                # Preferred: Chinese airport name (bsname), then code (aport), then city
+                dep_airport = dportinfo.get("bsname") or dportinfo.get("aport") or default_dep
+                arr_airport = aportinfo.get("bsname") or aportinfo.get("aport") or default_arr
+
+                dep_time_raw = dateinfo.get("ddate", "")
+                arr_time_raw = dateinfo.get("adate", "")
+                dep_time = dep_time_raw.split(" ")[1][:5] if " " in dep_time_raw else dep_time_raw
+                arr_time = arr_time_raw.split(" ")[1][:5] if " " in arr_time_raw else arr_time_raw
+
+                aircraft = craftinfo.get("cdisname", "")
+                stops = dateinfo.get("dcnt", 0)
+
+                for pol in item.get("policyinfo", []):
+                    price_val = pol.get("tprice", 0)
+                    if price_val > 0:
+                        lowest_price = price_val
+                        break
+
+        # ---- Parse flightGloryList rich format ----
+        elif "departureTime" in item or "arrivalTime" in item:
+            flight_no = item.get("flightNo", "")
+            airline_name = item.get("airlineName", "")
+            lowest_price = float(item.get("lowestPrice") or item.get("price", 0))
+
+            dep_airport = item.get("departureAirportName") or item.get("departureCityCode") or default_dep
+            arr_airport = item.get("arrivalAirportName") or item.get("arrivalCityCode") or default_arr
+
+            dep_time_raw = item.get("departureTime", "")
+            arr_time_raw = item.get("arrivalTime", "")
+            dep_time = dep_time_raw.split(" ")[1][:5] if " " in dep_time_raw else \
+                (dep_time_raw.split("T")[-1][:5] if "T" in dep_time_raw else dep_time_raw)
+            arr_time = arr_time_raw.split(" ")[1][:5] if " " in arr_time_raw else \
+                (arr_time_raw.split("T")[-1][:5] if "T" in arr_time_raw else arr_time_raw)
+
+            aircraft = item.get("aircraftName", "")
+
+        # ---- Calendar API fallback (airlineName + price, no times) ----
+        elif "airlineName" in item and ("price" in item or "lowestPrice" in item):
+            airline_name = item.get("airlineName", "")
+            flight_no = item.get("flightNo", "")
+            lowest_price = float(item.get("price") or item.get("lowestPrice", 0))
+            dep_airport = item.get("departureCityCode", default_dep)
+            arr_airport = item.get("arrivalCityCode", default_arr)
+            dep_time = ""
+            arr_time = ""
+
+        # Discard invalid data
+        if not lowest_price or lowest_price <= 0 or not flight_no:
+            return
+
         now = datetime.now().isoformat()
-        result = []
-        for item in flight_data:
-            try:
-                if not isinstance(item, dict):
-                    continue
+        purchase_url = (
+            f"https://flights.ctrip.com/online/list/oneway-{default_dep}-{default_arr}"
+            f"?depdate={query.departure_date}&cabin=y_s&adult=1&child=0&infant=0"
+        )
 
-                airline_name = ""
-                flight_no = ""
-                dep_airport = ""
-                arr_airport = ""
-                dep_time = ""
-                arr_time = ""
-                aircraft = ""
-                stops = 0
-                lowest_price = 0
-
-                # Handle flightListSearchForH5 format
-                mutilstn = item.get("mutilstn", [])
-                if mutilstn and isinstance(mutilstn, list) and len(mutilstn) > 0:
-                    seg = mutilstn[0]
-                    if isinstance(seg, dict):
-                        basinfo = seg.get("basinfo", {})
-                        dportinfo = seg.get("dportinfo", {})
-                        aportinfo = seg.get("aportinfo", {})
-                        dateinfo = seg.get("dateinfo", {})
-                        craftinfo = seg.get("craftinfo", {})
-
-                        flight_no = basinfo.get("flgno", "")
-                        airline_code = basinfo.get("aircode", "")
-                        airline_name = basinfo.get("airlineName", airline_code)
-                        dep_airport = dportinfo.get("aport", dep_code)
-                        arr_airport = aportinfo.get("aport", arr_code)
-                        dep_time = dateinfo.get("ddate", "")
-                        arr_time = dateinfo.get("adate", "")
-                        aircraft = craftinfo.get("cdisname", "")
-                        stops = dateinfo.get("dcnt", 0)
-
-                        # Get price from policyinfo
-                        policyinfo = item.get("policyinfo", [])
-                        for pol in policyinfo:
-                            if isinstance(pol, dict):
-                                price_val = pol.get("tprice", 0)
-                                if price_val and price_val > 0:
-                                    lowest_price = price_val
-                                    break
-
-                # Handle calendar API format (getLowestPriceCalendar fallback)
-                elif "airlineName" in item and "price" in item:
-                    airline_name = item.get("airlineName", "")
-                    flight_no = item.get("flightNo", "")
-                    lowest_price = float(item.get("price", 0))
-                    dep_airport = item.get("departureCityCode", dep_code)
-                    arr_airport = item.get("arrivalCityCode", arr_code)
-                    # Calendar API doesn't have times, use empty strings
-                    dep_time = ""
-                    arr_time = ""
-
-                # Handle flightGloryList format (rich data with times!)
-                elif "departureTime" in item or "arrivalTime" in item:
-                    airline_name = item.get("airlineName", "")
-                    flight_no = item.get("flightNo", "")
-                    lowest_price = float(item.get("price", 0))
-                    dep_airport = item.get("departureCityCode", dep_code)
-                    arr_airport = item.get("arrivalCityCode", arr_code)
-                    # Has times!
-                    dep_time = item.get("departureTime", "")
-                    arr_time = item.get("arrivalTime", "")
-                    aircraft = item.get("aircraft", "")
-                    # Extract HH:MM from full datetime
-                    if " " in dep_time:
-                        dep_time = dep_time.split(" ")[1] if len(dep_time.split(" ")) > 1 else dep_time
-                        # If still has date, try space split with T separator
-                        if "T" in item.get("departureTime", ""):
-                            dep_time = item["departureTime"].split("T")[1][:5] if "T" in item["departureTime"] else dep_time
-                    if " " in arr_time:
-                        arr_time = arr_time.split(" ")[1] if len(arr_time.split(" ")) > 1 else arr_time
-                        if "T" in item.get("arrivalTime", ""):
-                            arr_time = item["arrivalTime"].split("T")[1][:5] if "T" in item["arrivalTime"] else arr_time
-
-                if not lowest_price or lowest_price <= 0:
-                    continue
-
-                result.append(FlightPrice(
-                    query_id=query.id or 0,
-                    airline=airline_name or airline_code or "未知航司",
-                    flight_no=flight_no or "",
-                    aircraft=aircraft or "",
-                    departure_time=dep_time.split(" ")[1] if " " in dep_time else dep_time,
-                    arrival_time=arr_time.split(" ")[1] if " " in arr_time else arr_time,
-                    departure_airport=dep_airport,
-                    arrival_airport=arr_airport,
-                    duration="",
-                    stops=int(stops) if stops else 0,
-                    price=float(lowest_price),
-                    cabin_class=query.cabin_class,
-                    source=self.name,
-                    recorded_at=now,
-                    purchase_url=(
-                        f"https://flights.ctrip.com/online/list/oneway-{dep_code}-{arr_code}"
-                        f"?depdate={query.departure_date}&cabin=y_s&adult=1&child=0&infant=0"
-                    ),
-                ))
-            except Exception as e:
-                logger.warning(f"CtripBrowserSource: Failed to parse flight item: {e}")
-                continue
-
-        logger.info(f"CtripBrowserSource: Converted {len(result)} flights")
-        return result
+        # Keep only the lowest price per flight_no
+        unique_key = f"{flight_no}_{dep_time}" if dep_time else flight_no
+        if unique_key not in data_map or lowest_price < data_map[unique_key].price:
+            data_map[unique_key] = FlightPrice(
+                query_id=query.id or 0,
+                airline=airline_name or "未知航司",
+                flight_no=flight_no,
+                aircraft=aircraft,
+                departure_time=dep_time,
+                arrival_time=arr_time,
+                departure_airport=dep_airport,
+                arrival_airport=arr_airport,
+                duration="",
+                stops=int(stops) if stops else 0,
+                price=float(lowest_price),
+                cabin_class=query.cabin_class,
+                source=self.name,
+                recorded_at=now,
+                purchase_url=purchase_url,
+            )
 
     def __del__(self):
         self._close_browser()
