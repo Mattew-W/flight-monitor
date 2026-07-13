@@ -58,7 +58,7 @@ PURCHASE_PLATFORMS = {
         "name": "飞猪旅行",
         "color": "#ff6a00",
         "icon": "🐷",
-        "url": "https://sjipiao.fliggy.com/flight_search/domestic?depCity={dep}&arrCity={arr}&depDate={date}",
+        "url": "https://s.fliggy.com/flight/search?from={dep}&to={arr}&date={date}&adult=1&child=0",
     },
     "tongcheng": {
         "name": "同程旅行",
