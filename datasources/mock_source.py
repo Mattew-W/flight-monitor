@@ -391,23 +391,25 @@ class MockDataSource(BaseDataSource):
 
             if route_airlines:
                 # Use route-specific airline list
-                num_flights = min(random.randint(5, 8), len(route_airlines))
-                used_airlines = random.sample(route_airlines, num_flights)
+                num_flights = random.randint(8, 14)
+                used_airlines = random.sample(
+                    route_airlines, min(num_flights, len(route_airlines))
+                )
             else:
                 # Fallback: mix of Chinese majors + relevant international airlines
                 chinese_majors = ["中国国航", "南方航空", "东方航空", "海南航空"]
                 fallback_pool = chinese_majors + [
                     a for a in INTERNATIONAL_AIRLINES
                     if a not in chinese_majors
-                ][:8]
-                num_flights = random.randint(5, 8)
+                ][:12]
+                num_flights = random.randint(6, 12)
                 used_airlines = random.sample(
                     fallback_pool, min(num_flights, len(fallback_pool))
                 )
             aircraft_pool = LONG_HAUL_AIRCRAFT
         else:
             # Domestic routes: only use Chinese domestic airlines
-            num_flights = random.randint(8, 12)
+            num_flights = random.randint(12, 18)
             used_airlines = random.sample(
                 DOMESTIC_AIRLINES, min(num_flights, len(DOMESTIC_AIRLINES))
             )
@@ -498,19 +500,25 @@ class MockDataSource(BaseDataSource):
             for plat_key in ota_platforms:
                 plat_seed_val = sum(ord(c) for c in plat_key) % 10000
                 plat_rng = random.Random(flight_seed + plat_seed_val)
-                # Platform price variation: -5% to +8%
-                plat_factor = plat_rng.uniform(0.95, 1.08)
-                # Some platforms have promotional discounts
+                # Wide platform price variation: 72%-135% of base (realistic spread)
+                plat_factor = plat_rng.uniform(0.72, 1.35)
+                # Some platforms consistently cheaper, others premium
                 if plat_key == "qunar":
-                    plat_factor *= plat_rng.uniform(0.95, 1.0)
+                    plat_factor *= plat_rng.uniform(0.85, 0.98)  # Cheaper
                 elif plat_key == "fliggy":
-                    plat_factor *= plat_rng.uniform(0.96, 1.02)
+                    plat_factor *= plat_rng.uniform(0.88, 1.05)
+                elif plat_key == "ctrip":
+                    plat_factor *= plat_rng.uniform(0.92, 1.08)
+                elif plat_key == "tongcheng":
+                    plat_factor *= plat_rng.uniform(0.87, 1.03)
                 elif plat_key == "skyscanner":
-                    plat_factor *= plat_rng.uniform(0.97, 1.03)
+                    plat_factor *= plat_rng.uniform(0.82, 1.02)  # Aggregator
                 elif plat_key == "kayak":
-                    plat_factor *= plat_rng.uniform(0.96, 1.02)
+                    plat_factor *= plat_rng.uniform(0.85, 1.00)
                 elif plat_key == "googleflights":
-                    plat_factor *= plat_rng.uniform(0.98, 1.04)
+                    plat_factor *= plat_rng.uniform(0.90, 1.05)
+                elif plat_key == "tripcom":
+                    plat_factor *= plat_rng.uniform(0.88, 1.10)
 
                 plat_price = round(base_flight_price * plat_factor / 10) * 10
                 plat_price = max(120 if not intl else 300, plat_price)
