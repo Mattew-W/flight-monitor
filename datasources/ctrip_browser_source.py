@@ -183,7 +183,28 @@ class CtripBrowserSource(BaseDataSource):
             if "flightGloryList" in url and response.status == 200:
                 try:
                     data = response.json()
-                    logger.info(f"CtripBrowserSource: flightGloryList response keys: {list(data.keys())[:10]}")
+                    finfo = data.get("finfo")
+                    if isinstance(finfo, list) and finfo:
+                        # finfo is the rich flight data with times!
+                        rich_flights = []
+                        for fi in finfo:
+                            if not isinstance(fi, dict):
+                                continue
+                            flight = {
+                                "price": fi.get("lowestPrice", 0) or fi.get("price", 0),
+                                "airlineName": fi.get("airlineName", ""),
+                                "flightNo": fi.get("flightNo", ""),
+                                "departureCityCode": fi.get("departureCityCode", ""),
+                                "arrivalCityCode": fi.get("arrivalCityCode", ""),
+                                "departureTime": fi.get("departureTime", ""),
+                                "arrivalTime": fi.get("arrivalTime", ""),
+                                "aircraft": fi.get("aircraftName", ""),
+                            }
+                            if flight["price"] > 0 and flight["flightNo"]:
+                                rich_flights.append(flight)
+                        if rich_flights and not flight_data:
+                            flight_data = rich_flights
+                            logger.info(f"CtripBrowserSource: flightGloryList got {len(rich_flights)} flights WITH TIMES")
                 except Exception as e:
                     logger.warning(f"CtripBrowserSource: flightGloryList parse failed: {e}")
 
@@ -342,6 +363,28 @@ class CtripBrowserSource(BaseDataSource):
                     # Calendar API doesn't have times, use empty strings
                     dep_time = ""
                     arr_time = ""
+
+                # Handle flightGloryList format (rich data with times!)
+                elif "departureTime" in item or "arrivalTime" in item:
+                    airline_name = item.get("airlineName", "")
+                    flight_no = item.get("flightNo", "")
+                    lowest_price = float(item.get("price", 0))
+                    dep_airport = item.get("departureCityCode", dep_code)
+                    arr_airport = item.get("arrivalCityCode", arr_code)
+                    # Has times!
+                    dep_time = item.get("departureTime", "")
+                    arr_time = item.get("arrivalTime", "")
+                    aircraft = item.get("aircraft", "")
+                    # Extract HH:MM from full datetime
+                    if " " in dep_time:
+                        dep_time = dep_time.split(" ")[1] if len(dep_time.split(" ")) > 1 else dep_time
+                        # If still has date, try space split with T separator
+                        if "T" in item.get("departureTime", ""):
+                            dep_time = item["departureTime"].split("T")[1][:5] if "T" in item["departureTime"] else dep_time
+                    if " " in arr_time:
+                        arr_time = arr_time.split(" ")[1] if len(arr_time.split(" ")) > 1 else arr_time
+                        if "T" in item.get("arrivalTime", ""):
+                            arr_time = item["arrivalTime"].split("T")[1][:5] if "T" in item["arrivalTime"] else arr_time
 
                 if not lowest_price or lowest_price <= 0:
                     continue

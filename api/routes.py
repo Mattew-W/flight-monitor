@@ -149,23 +149,42 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             return jsonify({"error": "Query not found"}), 404
         prices = monitor.check_query(q)
 
-        # Group by flight: prefer (airline + flight_no + departure_time),
-        # fall back to (airline + flight_no) when time is empty (e.g., calendar API)
+        # Group by flight: use (airline + flight_no + departure_time) when time available,
+        # but only (airline + flight_no) when time is empty (calendar API data)
+        # so the same flight from different sources merges together.
+        # Build time index from records that DO have times.
+        times_by_flight = {}
+        for p in prices:
+            if p.departure_time and p.arrival_time:
+                key = f"{p.airline}_{p.flight_no}"
+                if key not in times_by_flight:
+                    times_by_flight[key] = {
+                        "departure_time": p.departure_time,
+                        "arrival_time": p.arrival_time,
+                        "aircraft": p.aircraft,
+                        "stops": p.stops,
+                        "duration": p.duration,
+                    }
+
         flight_groups = {}
         for p in prices:
             time_part = p.departure_time or "no-time"
             key = f"{p.airline}_{p.flight_no}_{time_part}"
             if key not in flight_groups or p.price < flight_groups[key]["price"]:
+                # Backfill times from same flight_no if current record has no time
+                backfill_key = f"{p.airline}_{p.flight_no}"
+                backfill = times_by_flight.get(backfill_key, {})
+
                 flight_groups[key] = {
                     "airline": p.airline,
                     "flight_no": p.flight_no,
-                    "aircraft": p.aircraft,
-                    "departure_time": p.departure_time,
-                    "arrival_time": p.arrival_time,
+                    "aircraft": p.aircraft or backfill.get("aircraft", ""),
+                    "departure_time": p.departure_time or backfill.get("departure_time", ""),
+                    "arrival_time": p.arrival_time or backfill.get("arrival_time", ""),
                     "departure_airport": p.departure_airport,
                     "arrival_airport": p.arrival_airport,
-                    "duration": p.duration,
-                    "stops": p.stops,
+                    "duration": p.duration or backfill.get("duration", ""),
+                    "stops": p.stops or backfill.get("stops", 0),
                     "price": p.price,
                     "source": p.source,
                     "purchase_url": p.purchase_url,
@@ -197,6 +216,33 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             base["platform_prices"] = platform_prices[:6]
             flight_list.append(base)
 
+        # Merge flights that have same (airline + flight_no) regardless of time bucket
+        # (this unifies ctrip_browser's no-time data with mock data that has times)
+        final_list = {}
+        for f in flight_list:
+            merge_key = f"{f['airline']}_{f['flight_no']}"
+            if merge_key not in final_list:
+                final_list[merge_key] = f
+            else:
+                existing = final_list[merge_key]
+                # If existing has no time but new does, take new's time info
+                if not existing.get("departure_time") and f.get("departure_time"):
+                    existing["departure_time"] = f["departure_time"]
+                    existing["arrival_time"] = f["arrival_time"]
+                    existing["aircraft"] = f.get("aircraft") or existing.get("aircraft", "")
+                    existing["duration"] = f.get("duration") or existing.get("duration", "")
+                    existing["departure_airport"] = f.get("departure_airport") or existing.get("departure_airport", "")
+                    existing["arrival_airport"] = f.get("arrival_airport") or existing.get("arrival_airport", "")
+                # Merge platform prices
+                seen_plat = {p["source"] for p in existing.get("platform_prices", [])}
+                for p in f.get("platform_prices", []):
+                    if p["source"] not in seen_plat:
+                        existing.setdefault("platform_prices", []).append(p)
+                        seen_plat.add(p["source"])
+                # Take the lower price
+                if f["price"] < existing["price"]:
+                    existing["price"] = f["price"]
+        flight_list = list(final_list.values())
         flight_list.sort(key=lambda x: x["price"])
 
         return jsonify({
