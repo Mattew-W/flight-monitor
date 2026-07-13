@@ -56,7 +56,12 @@ def main():
     try:
         app.run(host=HOST, port=PORT, debug=DEBUG, use_reloader=False)
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        logger.info("Interrupted by user.")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        raise
+    finally:
+        logger.info("Shutting down monitor...")
         monitor.stop()
         logger.info("Goodbye!")
 

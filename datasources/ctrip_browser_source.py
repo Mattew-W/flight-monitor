@@ -74,10 +74,21 @@ class CtripBrowserSource(BaseDataSource):
         self._playwright = None
         self._browser = None
         self._context = None
-        self._page = None
+        self._last_used = 0.0
+        self._max_idle_seconds = 60
 
     def is_available(self) -> bool:
         return HAS_PLAYWRIGHT
+
+    def _ensure_browser(self):
+        """Lazy init browser. Re-creates if idle too long."""
+        now = time.time()
+        if self._browser and (now - self._last_used) > self._max_idle_seconds:
+            logger.info("CtripBrowserSource: Browser idle too long, closing...")
+            self._close_browser()
+        if not self._browser:
+            self._init_browser()
+        self._last_used = time.time()
 
     def _init_browser(self):
         """Initialize browser session with stable headless mode."""
@@ -107,10 +118,11 @@ class CtripBrowserSource(BaseDataSource):
                       "Version/16.0 Mobile/15E148 Safari/604.1",
             locale="zh-CN",
         )
-        self._page = self._context.new_page()
         # Visit homepage to establish session
-        self._page.goto("https://m.ctrip.com/html5/flight/swift/", wait_until="domcontentloaded")
-        self._page.wait_for_timeout(5000)
+        page = self._context.new_page()
+        page.goto("https://m.ctrip.com/html5/flight/swift/", wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
+        page.close()  # warm-up page, not needed after session established
 
     def _close_browser(self):
         try:
@@ -130,9 +142,9 @@ class CtripBrowserSource(BaseDataSource):
             pass
         self._browser = None
         self._context = None
-        self._page = None
 
-    def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
+    def _do_search(self, page, query, dep_code, dep_id, arr_code, arr_id):
+        """Execute search logic on the given page. Internal method."""
         """
         Search flights by navigating to the flight list page and
         intercepting the flightListSearchForH5 API response.
@@ -154,10 +166,23 @@ class CtripBrowserSource(BaseDataSource):
         arr_code, arr_id = city_info2
 
         try:
-            self._init_browser()
+            self._ensure_browser()
         except Exception as e:
             logger.error(f"CtripBrowserSource: Browser init failed: {e}")
             return []
+
+        # Use a fresh page per search to avoid state pollution
+        page = self._context.new_page()
+        try:
+            return self._do_search(page, query, dep_code, dep_id, arr_code, arr_id)
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    def _do_search(self, page, query, dep_code, dep_id, arr_code, arr_id) -> List[FlightPrice]:
+        """Execute the actual search on the given page."""
 
         flight_data = []
 
@@ -225,14 +250,14 @@ class CtripBrowserSource(BaseDataSource):
                 except Exception as e:
                     logger.warning(f"CtripBrowserSource: Calendar parse failed: {e}")
 
-        self._page.on("response", on_response)
+        page.on("response", on_response)
 
         # Also log all XHR requests to find the flight list API
         def on_request(request):
             url = request.url
             if "restapi/soa2" in url or "flightList" in url or "flightlist" in url.lower():
                 all_urls.add(f"REQ:{url[:250]}")
-        self._page.on("request", on_request)
+        page.on("request", on_request)
 
         try:
             # Navigate to flight list page with route params
@@ -245,8 +270,8 @@ class CtripBrowserSource(BaseDataSource):
             )
 
             logger.info(f"CtripBrowserSource: Navigating to flight list page...")
-            self._page.goto(search_url, wait_until="domcontentloaded")
-            self._page.wait_for_timeout(15000)
+            page.goto(search_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(15000)
 
             # Try POST to flightListSearchForH5 directly to get time data
             try:
@@ -273,7 +298,7 @@ class CtripBrowserSource(BaseDataSource):
                              "extension": []},
                 }
                 # Try the POST endpoint for detailed flight info
-                resp = self._page.evaluate("""
+                resp = page.evaluate("""
                     async (data) => {
                         try {
                             const r = await fetch('/restapi/soa2/14488/flightListSearchForH5', {
@@ -293,8 +318,8 @@ class CtripBrowserSource(BaseDataSource):
             except Exception as e:
                 logger.warning(f"CtripBrowserSource: POST attempt failed: {e}")
         finally:
-            self._page.remove_listener("response", on_response)
-            self._page.remove_listener("request", on_request)
+            page.remove_listener("response", on_response)
+            page.remove_listener("request", on_request)
 
         if not flight_data:
             logger.warning("CtripBrowserSource: No flight list data intercepted")

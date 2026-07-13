@@ -17,22 +17,22 @@ DEBUG = False
 MONITOR_INTERVAL_SECONDS = 300  # 5 minutes default polling interval
 
 # Notification
-# Email settings (leave empty to disable)
-SMTP_HOST = ""
-SMTP_PORT = 465
-SMTP_USER = ""
-SMTP_PASS = ""
-EMAIL_TO = ""
+# Email settings (leave empty to disable; prefer env vars: SMTP_HOST, SMTP_PASS, etc.)
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+EMAIL_TO = os.environ.get("EMAIL_TO", "")
 
 # Server Chan (WeChat push) - https://sct.ftqq.com/
-SERVERCHAN_KEY = ""
+SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 
 # Feishu webhook
-FEISHU_WEBHOOK = ""
+FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
 # Data Sources
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
 
 # Which data sources are enabled (mock simulates all platforms)
 ENABLED_SOURCES = ["mock", "ctrip_browser"]

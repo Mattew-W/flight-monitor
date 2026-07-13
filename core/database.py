@@ -2,28 +2,35 @@
 Flight Monitor - Database Manager
 Handles SQLite operations for all persistent data.
 """
+import logging
 import sqlite3
 import os
+import threading
 import uuid
 from datetime import datetime
 from typing import List, Optional
 from .models import SearchQuery, FlightPrice, PriceAlert, AlertHistory
 
+logger = logging.getLogger(__name__)
 
 class Database:
     """SQLite database manager for flight monitor."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._local = threading.local()
+        self._lock = threading.RLock()
         self._init_db()
         self._migrate()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            self._local.conn = conn
+        return self._local.conn
 
     def _init_db(self):
         """Create tables if they don't exist."""
@@ -96,19 +103,22 @@ class Database:
             conn.close()
 
     def _migrate(self):
-        """Add purchase_url column if it doesn't exist (backward compat)."""
+        """Add missing columns to existing tables (backward compat)."""
         conn = self._get_conn()
         try:
             cols = conn.execute("PRAGMA table_info(price_records)").fetchall()
-            col_names = [c["name"] for c in cols]
-            if "purchase_url" not in col_names:
-                conn.execute("ALTER TABLE price_records ADD COLUMN purchase_url TEXT DEFAULT ''")
-                conn.commit()
-            if "batch_id" not in col_names:
-                conn.execute("ALTER TABLE price_records ADD COLUMN batch_id TEXT DEFAULT ''")
-                conn.commit()
-        except Exception:
-            pass
+            col_names = {c["name"] for c in cols}
+            migrations = [
+                ("purchase_url", "ALTER TABLE price_records ADD COLUMN purchase_url TEXT DEFAULT ''"),
+                ("batch_id", "ALTER TABLE price_records ADD COLUMN batch_id TEXT DEFAULT ''"),
+            ]
+            for col_name, ddl in migrations:
+                if col_name not in col_names:
+                    conn.execute(ddl)
+                    conn.commit()
+                    logger.info(f"Migration: added column '{col_name}'")
+        except Exception as e:
+            logger.error(f"Migration error: {e}")
         finally:
             conn.close()
 

@@ -39,35 +39,35 @@ class PriceMonitor:
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
 
     def start(self):
         """Start the monitoring thread."""
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         logger.info(f"Price monitor started (interval={self.interval}s)")
 
     def stop(self):
         """Stop the monitoring thread."""
+        self._stop_event.set()
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
         logger.info("Price monitor stopped")
 
     def _run_loop(self):
-        """Main monitoring loop."""
-        while self._running:
+        """Main monitoring loop with interruptible sleep."""
+        while not self._stop_event.is_set():
             try:
                 self._check_all()
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")
-            # Sleep in small increments so we can stop quickly
-            for _ in range(self.interval):
-                if not self._running:
-                    break
-                time.sleep(1)
+            # Interruptible sleep using Event.wait()
+            self._stop_event.wait(timeout=self.interval)
 
     def _check_all(self):
         """Check all monitoring queries."""

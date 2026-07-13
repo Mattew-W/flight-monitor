@@ -6,6 +6,7 @@ import logging
 import os
 import csv
 import io
+from datetime import datetime
 from flask import Flask, request, jsonify, render_template, Response
 from core.database import Database
 from core.models import SearchQuery, PriceAlert
@@ -114,11 +115,24 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
 
     @app.route("/api/queries", methods=["POST"])
     def create_query():
-        data = request.json
+        data = request.json or {}
+
+        # Validate required fields
+        required = ["departure", "destination", "departure_date"]
+        missing = [f for f in required if not data.get(f)]
+        if missing:
+            return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
+
+        # Validate date format
+        try:
+            datetime.strptime(data["departure_date"], "%Y-%m-%d")
+        except ValueError:
+            return jsonify({"error": "departure_date must be YYYY-MM-DD"}), 400
+
         q = SearchQuery(
-            departure=data.get("departure", ""),
-            destination=data.get("destination", ""),
-            departure_date=data.get("departure_date", ""),
+            departure=data.get("departure", "").strip(),
+            destination=data.get("destination", "").strip(),
+            departure_date=data["departure_date"],
             cabin_class=data.get("cabin_class", "economy"),
             trip_type=data.get("trip_type", "oneway"),
             return_date=data.get("return_date", ""),
@@ -389,10 +403,21 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
 
     @app.route("/api/alerts", methods=["POST"])
     def create_alert():
-        data = request.json
+        data = request.json or {}
+
+        if not data.get("query_id"):
+            return jsonify({"error": "query_id is required"}), 400
+        if not data.get("target_price") or data["target_price"] <= 0:
+            return jsonify({"error": "target_price must be a positive number"}), 400
+
+        # Verify query exists
+        q = db.get_query(data["query_id"])
+        if not q:
+            return jsonify({"error": "Query not found"}), 404
+
         alert = PriceAlert(
-            query_id=data.get("query_id", 0),
-            target_price=data.get("target_price", 0),
+            query_id=data["query_id"],
+            target_price=float(data["target_price"]),
             is_active=data.get("is_active", True),
             notify_email=data.get("notify_email", True),
             notify_wechat=data.get("notify_wechat", False),
