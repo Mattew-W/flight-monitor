@@ -18,25 +18,25 @@ class Database:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._local = threading.local()
         self._lock = threading.RLock()
         self._init_db()
         self._migrate()
 
     def _get_conn(self) -> sqlite3.Connection:
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = conn
-        return self._local.conn
+        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def close(self):
+        """Close database connection on shutdown."""
+        pass  # Connections are per-operation, nothing to close
 
     def _init_db(self):
         """Create tables if they don't exist."""
         conn = self._get_conn()
-        try:
-            conn.executescript("""
+        conn.executescript("""
                 CREATE TABLE IF NOT EXISTS search_queries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     departure TEXT NOT NULL,
@@ -98,9 +98,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_price_time ON price_records(recorded_at);
                 CREATE INDEX IF NOT EXISTS idx_alert_query ON price_alerts(query_id);
             """)
-            conn.commit()
-        finally:
-            conn.close()
+        conn.commit()
 
     def _migrate(self):
         """Add missing columns to existing tables (backward compat)."""
@@ -119,8 +117,6 @@ class Database:
                     logger.info(f"Migration: added column '{col_name}'")
         except Exception as e:
             logger.error(f"Migration error: {e}")
-        finally:
-            conn.close()
 
     # ── Search Queries ──────────────────────────────────────────
 

@@ -143,12 +143,11 @@ class CtripBrowserSource(BaseDataSource):
         self._browser = None
         self._context = None
 
-    def _do_search(self, page, query, dep_code, dep_id, arr_code, arr_id):
-        """Execute search logic on the given page. Internal method."""
+    def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
         """
         Search flights by navigating to the flight list page and
-        intercepting the flightListSearchForH5 API response.
-        This gives full flight data: airline, flight_no, departure/arrival times, price.
+        intercepting the getLowestPriceCalendar / flightGloryList API responses.
+        Uses a fresh Playwright page per search to avoid state pollution.
         """
         if not self.is_available():
             return []
@@ -181,8 +180,7 @@ class CtripBrowserSource(BaseDataSource):
             except Exception:
                 pass
 
-    def _do_search(self, page, query, dep_code, dep_id, arr_code, arr_id) -> List[FlightPrice]:
-        """Execute the actual search on the given page."""
+    def _do_search(self, page, query, dep_code, dep_id, arr_code, arr_id):
 
         flight_data = []
 
