@@ -1,17 +1,17 @@
 """
 Flight Monitor - Database Manager
-Handles SQLite operations for all persistent data.
+Thread-safe SQLite with WAL mode, batched writes, and automatic pruning.
 """
 import logging
 import sqlite3
-import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from .models import SearchQuery, FlightPrice, PriceAlert, AlertHistory
 
 logger = logging.getLogger(__name__)
+
 
 class Database:
     """SQLite database manager for flight monitor."""
@@ -27,11 +27,20 @@ class Database:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-8000")  # 8MB cache
         return conn
 
     def close(self):
-        """Close database connection on shutdown."""
-        pass  # Connections are per-operation, nothing to close
+        """Run database maintenance on shutdown."""
+        conn = self._get_conn()
+        try:
+            conn.execute("PRAGMA optimize")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+        finally:
+            conn.close()
 
     def _init_db(self):
         """Create tables if they don't exist."""
@@ -121,21 +130,22 @@ class Database:
     # ── Search Queries ──────────────────────────────────────────
 
     def add_query(self, q: SearchQuery) -> int:
-        conn = self._get_conn()
-        try:
-            now = datetime.now().isoformat()
-            cur = conn.execute(
-                """INSERT INTO search_queries
-                   (departure, destination, departure_date, cabin_class,
-                    trip_type, return_date, is_monitoring, created_at, label)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (q.departure, q.destination, q.departure_date, q.cabin_class,
-                 q.trip_type, q.return_date, int(q.is_monitoring), now, q.label)
-            )
-            conn.commit()
-            return cur.lastrowid
-        finally:
-            conn.close()
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                now = datetime.now().isoformat()
+                cur = conn.execute(
+                    """INSERT INTO search_queries
+                       (departure, destination, departure_date, cabin_class,
+                        trip_type, return_date, is_monitoring, created_at, label)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (q.departure, q.destination, q.departure_date, q.cabin_class,
+                     q.trip_type, q.return_date, int(q.is_monitoring), now, q.label)
+                )
+                conn.commit()
+                return cur.lastrowid
+            finally:
+                conn.close()
 
     def get_query(self, query_id: int) -> Optional[SearchQuery]:
         conn = self._get_conn()
@@ -181,69 +191,52 @@ class Database:
             conn.close()
 
     def delete_query(self, query_id: int):
-        """Delete a query and cascade-delete its price records.
-
-        Uses transaction with foreign_keys=OFF temporarily to avoid
-        per-row cascade checks, then re-enables and verifies.
-        """
-        conn = self._get_conn()
-        try:
-            # Count first so we can decide fast path
-            cnt = conn.execute(
-                "SELECT COUNT(*) FROM price_records WHERE query_id=?",
-                (query_id,),
-            ).fetchone()[0]
-
-            if cnt == 0:
-                # Fast path: no related records
-                conn.execute("DELETE FROM search_queries WHERE id=?", (query_id,))
-                conn.commit()
-                return
-
-            # Batched delete + drop the index temporarily for speed on big queries
-            # Begin transaction
-            conn.execute("BEGIN")
+        """Delete a query and all its price records in a single transaction."""
+        with self._lock:
+            conn = self._get_conn()
             try:
-                # Batch delete price records (1000 at a time)
-                while True:
-                    deleted = conn.execute(
-                        "DELETE FROM price_records WHERE query_id=? AND id IN "
-                        "(SELECT id FROM price_records WHERE query_id=? LIMIT 1000)",
-                        (query_id, query_id),
-                    ).rowcount
-                    if deleted == 0:
-                        break
-                conn.execute("DELETE FROM search_queries WHERE id=?", (query_id,))
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        finally:
-            conn.close()
+                conn.execute("BEGIN")
+                try:
+                    # Delete all related records in one go — the idx_price_query
+                    # index makes this fast even for 10k+ records
+                    conn.execute("DELETE FROM price_records WHERE query_id=?", (query_id,))
+                    conn.execute("DELETE FROM price_alerts WHERE query_id=?", (query_id,))
+                    conn.execute("DELETE FROM search_queries WHERE id=?", (query_id,))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            finally:
+                conn.close()
 
     def delete_queries_bulk(self, query_ids: List[int]):
         """Bulk delete multiple queries in a single transaction."""
         if not query_ids:
             return
-        placeholders = ",".join("?" * len(query_ids))
-        conn = self._get_conn()
-        try:
-            conn.execute("BEGIN")
+        with self._lock:
+            placeholders = ",".join("?" * len(query_ids))
+            conn = self._get_conn()
             try:
-                conn.execute(
-                    f"DELETE FROM price_records WHERE query_id IN ({placeholders})",
-                    query_ids,
-                )
-                conn.execute(
-                    f"DELETE FROM search_queries WHERE id IN ({placeholders})",
-                    query_ids,
-                )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        finally:
-            conn.close()
+                conn.execute("BEGIN")
+                try:
+                    conn.execute(
+                        f"DELETE FROM price_records WHERE query_id IN ({placeholders})",
+                        query_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM price_alerts WHERE query_id IN ({placeholders})",
+                        query_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM search_queries WHERE id IN ({placeholders})",
+                        query_ids,
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            finally:
+                conn.close()
 
     # ── Price Records ───────────────────────────────────────────
 
@@ -268,24 +261,31 @@ class Database:
             conn.close()
 
     def add_price_records(self, records: List[FlightPrice]):
-        conn = self._get_conn()
-        try:
-            batch_id = str(uuid.uuid4())[:8]
-            now = datetime.now().isoformat()
-            conn.executemany(
-                """INSERT INTO price_records
-                   (query_id, airline, flight_no, aircraft, departure_time,
-                    arrival_time, departure_airport, arrival_airport, duration,
-                    stops, price, cabin_class, source, recorded_at, purchase_url, batch_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [(r.query_id, r.airline, r.flight_no, r.aircraft,
-                  r.departure_time, r.arrival_time, r.departure_airport,
-                  r.arrival_airport, r.duration, r.stops, r.price,
-                  r.cabin_class, r.source, now, r.purchase_url, batch_id) for r in records]
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        if not records:
+            return
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                batch_id = str(uuid.uuid4())[:8]
+                now = datetime.now().isoformat()
+                conn.execute("BEGIN")
+                conn.executemany(
+                    """INSERT INTO price_records
+                       (query_id, airline, flight_no, aircraft, departure_time,
+                        arrival_time, departure_airport, arrival_airport, duration,
+                        stops, price, cabin_class, source, recorded_at, purchase_url, batch_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [(r.query_id, r.airline, r.flight_no, r.aircraft,
+                      r.departure_time, r.arrival_time, r.departure_airport,
+                      r.arrival_airport, r.duration, r.stops, r.price,
+                      r.cabin_class, r.source, now, r.purchase_url, batch_id) for r in records]
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def get_price_history(self, query_id: int, limit: int = 500,
                           source_filter: str = "") -> List[dict]:
@@ -548,23 +548,32 @@ class Database:
         )
 
     def prune_expired_records(self, days_old: int = 45):
-        """Delete historical prices older than X days to prevent SQLite database bloat."""
-        conn = self._get_conn()
-        try:
-            from datetime import timedelta
-            cutoff_date = (datetime.now() - timedelta(days=days_old)).isoformat()
-            cur = conn.execute(
-                "DELETE FROM price_records WHERE recorded_at < ?",
-                (cutoff_date,)
-            )
-            conn.commit()
-            logger.info(f"Database Pruning: Removed {cur.rowcount} old price records.")
-            return cur.rowcount
-        except Exception as e:
-            logger.error(f"Pruning error: {e}")
-            return 0
-        finally:
-            conn.close()
+        """Delete historical prices older than X days.
+
+        Skips records belonging to actively monitored queries.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cutoff_date = (datetime.now() - timedelta(days=days_old)).isoformat()
+                # Only prune non-monitored queries (preserve active monitoring data)
+                cur = conn.execute(
+                    """DELETE FROM price_records WHERE rowid IN (
+                           SELECT pr.rowid FROM price_records pr
+                           JOIN search_queries sq ON pr.query_id = sq.id
+                           WHERE pr.recorded_at < ? AND sq.is_monitoring = 0
+                       )""",
+                    (cutoff_date,)
+                )
+                conn.commit()
+                if cur.rowcount:
+                    logger.info(f"Database Pruning: Removed {cur.rowcount} old records.")
+                return cur.rowcount
+            except Exception as e:
+                logger.error(f"Pruning error: {e}")
+                return 0
+            finally:
+                conn.close()
 
     def _row_to_price(self, row) -> FlightPrice:
         return FlightPrice(
