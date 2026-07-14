@@ -1,0 +1,314 @@
+"""
+Universal Airline API Sniffer — 通用航司数据嗅探器
+
+原理: 用 Playwright 访问航司搜索页，拦截所有 JSON 响应，
+     自动识别包含航班数据的响应并提取。
+
+优势:
+  - 不需要预先知道 API endpoint
+  - 一次嗅探就能发现所有数据
+  - 对任何航司通用
+
+支持的航司 (配置即可, 无需修改代码):
+  - airchina: 国航 m.airchina.com.cn
+  - csair: 南航 m.csair.com
+  - ceair: 东航 m.ceair.com
+  - 可扩展...
+"""
+import json
+import logging
+import re
+from datetime import datetime
+from typing import List, Dict, Optional
+from urllib.parse import quote
+
+from core.models import FlightPrice, SearchQuery
+from datasources.base import BaseDataSource
+
+logger = logging.getLogger(__name__)
+
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+
+
+# ══════════════════════════════════════════════════════════════
+#  Per-airline configuration
+#  Add new airlines by adding entries here.
+# ══════════════════════════════════════════════════════════════
+
+AIRLINE_CONFIGS = {
+    "airchina": {
+        "name": "中国国航",
+        "search_url": (
+            "https://m.airchina.com.cn/#/flightSearch?"
+            "tripType=OW&depCity={dep}&arrCity={arr}&depDate={date}"
+            "&adtCount=1&chdCount=0&infCount=0"
+        ),
+        "city_map": {
+            "北京": "BJS", "上海": "SHA", "广州": "CAN", "深圳": "SZX",
+            "成都": "CTU", "杭州": "HGH", "南京": "NKG", "武汉": "WUH",
+            "重庆": "CKG", "厦门": "XMN", "青岛": "TAO", "西安": "XIY",
+            "昆明": "KMG", "大连": "DLC", "天津": "TSN",
+        },
+    },
+    "csair": {
+        "name": "南方航空",
+        "search_url": (
+            "https://m.csair.com/#/flight?"
+            "tripType=0&depCity={dep}&arrCity={arr}&depDate={date}&adt=1"
+        ),
+        "city_map": {
+            "北京": "BJS", "上海": "SHA", "广州": "CAN", "深圳": "SZX",
+            "成都": "CTU", "杭州": "HGH", "南京": "NKG", "武汉": "WUH",
+            "重庆": "CKG", "厦门": "XMN", "昆明": "KMG",
+        },
+    },
+    "ceair": {
+        "name": "东方航空",
+        "search_url": (
+            "https://m.ceair.com/#/flight?"
+            "type=OW&depcd={dep}&arrcd={arr}&depdt={date}&adt=1"
+        ),
+        "city_map": {
+            "北京": "BJS", "上海": "SHA", "广州": "CAN", "深圳": "SZX",
+            "成都": "CTU", "杭州": "HGH", "南京": "NKG", "武汉": "WUH",
+            "重庆": "CKG", "厦门": "XMN", "西安": "XIY",
+        },
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════
+#  Flight data auto-detection
+# ══════════════════════════════════════════════════════════════
+
+FLIGHT_FIELD_PATTERNS = {
+    "flight_no": [
+        r'^[A-Z]{2}\d{2,4}$',           # exact: CA1234
+        r'^[A-Z0-9]{3,8}$',              # lenient
+    ],
+    "price_fields": [
+        "price", "lowestPrice", "salePrice", "ticketPrice",
+        "adultPrice", "totalPrice", "baseFare", "totalFare",
+        "minPrice", "displayPrice", "fare", "amount",
+    ],
+    "airline_fields": [
+        "airlineName", "carrier", "carrierName", "airlineCode",
+        "airCompany", "flightCompany",
+    ],
+    "time_fields": [
+        "departTime", "departureTime", "deptTime",
+        "arriveTime", "arrivalTime", "arrTime",
+    ],
+}
+
+
+def _is_flight_record(obj: dict) -> bool:
+    """Heuristic: does this dict look like a flight record?"""
+    if not isinstance(obj, dict):
+        return False
+    # Must have something that looks like a flight number
+    for key, val in obj.items():
+        if isinstance(val, str) and re.match(r'^[A-Z]{2}\d{2,4}$', val):
+            return True
+    return False
+
+
+def _find_flight_list(data, depth: int = 0) -> Optional[List[dict]]:
+    """Recursively find a list of flight-like objects in arbitrary JSON."""
+    if depth > 10:
+        return None
+    
+    if isinstance(data, list):
+        if len(data) > 0 and _is_flight_record(data[0]):
+            return data
+        # Check first few items
+        for item in data[:3]:
+            result = _find_flight_list(item, depth + 1)
+            if result:
+                return result
+    elif isinstance(data, dict):
+        for key in ["flightList", "flights", "data", "result", "itineraryList",
+                     "flightInfoList", "scheduleList", "availList", "segments"]:
+            if key in data:
+                result = _find_flight_list(data[key], depth + 1)
+                if result:
+                    return result
+        # Check ALL values
+        for val in data.values():
+            result = _find_flight_list(val, depth + 1)
+            if result:
+                return result
+    
+    return None
+
+
+def _extract_price(item: dict) -> float:
+    """Extract price from a flight-like dict, trying all known price field names."""
+    for field in FLIGHT_FIELD_PATTERNS["price_fields"]:
+        val = item.get(field)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    # Try nested price objects
+    for sub_key in ["priceInfo", "price", "fareInfo"]:
+        sub = item.get(sub_key)
+        if isinstance(sub, dict):
+            return _extract_price(sub)
+    return 0
+
+
+def _extract_field(item: dict, candidates: List[str]) -> str:
+    """Try multiple field names, return first non-empty value."""
+    for key in candidates:
+        val = item.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _normalize_flight(item: dict, query: SearchQuery, source: str) -> Optional[FlightPrice]:
+    """Convert arbitrary flight-like dict to FlightPrice."""
+    now = datetime.now().isoformat()
+    
+    # Find flight number
+    fn = ""
+    for key, val in item.items():
+        if isinstance(val, str) and re.match(r'^[A-Z]{2}\d{2,4}$', val):
+            fn = val
+            break
+    if not fn:
+        fn = _extract_field(item, ["flightNo", "flightNumber", "fltNo", "flightCode"])
+    if not fn:
+        return None
+    
+    price = _extract_price(item)
+    if price <= 0:
+        return None
+    
+    return FlightPrice(
+        query_id=query.id or 0,
+        airline=_extract_field(item, FLIGHT_FIELD_PATTERNS["airline_fields"]) or fn[:2],
+        flight_no=fn,
+        aircraft=_extract_field(item, ["aircraftType", "craftType", "planeType", "equipment"]),
+        departure_time=_extract_field(item, FLIGHT_FIELD_PATTERNS["time_fields"][:3]),
+        arrival_time=_extract_field(item, FLIGHT_FIELD_PATTERNS["time_fields"][3:]),
+        departure_airport=_extract_field(item, ["depAirport", "depPort", "departureAirport", "fromAirport"]),
+        arrival_airport=_extract_field(item, ["arrAirport", "arrPort", "arrivalAirport", "toAirport"]),
+        duration=_extract_field(item, ["duration", "flyTime", "travelTime"]),
+        stops=int(_extract_field(item, ["stopCount", "stops", "transferCount"]) or 0),
+        price=price,
+        cabin_class=query.cabin_class,
+        source=source,
+        recorded_at=now,
+        purchase_url="",
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+#  Main scraper class
+# ══════════════════════════════════════════════════════════════
+
+class AirlineSnifferSource(BaseDataSource):
+    """Universal airline data sniffer - works with any configured airline."""
+    
+    def __init__(self, airline_key: str):
+        cfg = AIRLINE_CONFIGS.get(airline_key)
+        if not cfg:
+            raise ValueError(f"Unknown airline: {airline_key}. Available: {list(AIRLINE_CONFIGS.keys())}")
+        self._key = airline_key
+        self._cfg = cfg
+        self.name = f"{airline_key}_sniffer"
+    
+    def is_available(self) -> bool:
+        return HAS_PLAYWRIGHT
+    
+    def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
+        """Visit airline search page, intercept all JSON, extract flights."""
+        if not HAS_PLAYWRIGHT:
+            return []
+        
+        city_map = self._cfg["city_map"]
+        dep_code = city_map.get(query.departure, query.departure)
+        arr_code = city_map.get(query.destination, query.destination)
+        
+        url = self._cfg["search_url"].format(
+            dep=dep_code, arr=arr_code, date=query.departure_date
+        )
+        
+        all_json_responses = []
+        
+        def capture_json(response):
+            if response.status == 200:
+                ct = response.headers.get("content-type", "")
+                if "json" in ct or "javascript" in ct:
+                    try:
+                        all_json_responses.append(response.json())
+                    except Exception:
+                        pass
+        
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--headless=new", "--no-sandbox", "--disable-gpu",
+                          "--disable-dev-shm-usage"]
+                )
+                ctx = browser.new_context(
+                    viewport={"width": 375, "height": 812},
+                    user_agent=(
+                        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                        "AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
+                    ),
+                    locale="zh-CN",
+                )
+                page = ctx.new_page()
+                
+                page.on("response", capture_json)
+                
+                logger.debug(f"[{self._key}] Loading: {url[:80]}")
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(10000)  # wait for JS to load data
+                
+                page.remove_listener("response", capture_json)
+                browser.close()
+        except Exception as e:
+            logger.warning(f"[{self._key}] Browser error: {e}")
+            return []
+        
+        # Analyze all captured JSON responses
+        results = []
+        for data in all_json_responses:
+            flight_list = _find_flight_list(data)
+            if flight_list:
+                for item in flight_list:
+                    if isinstance(item, dict):
+                        flight = _normalize_flight(item, query, self.name)
+                        if flight:
+                            results.append(flight)
+        
+        if results:
+            logger.info(f"[{self._key}] {query.departure}->{query.destination}: "
+                       f"{len(results)} flights from {len(all_json_responses)} JSON responses")
+        
+        return results
+
+
+# ══════════════════════════════════════════════════════════════
+#  Factory
+# ══════════════════════════════════════════════════════════════
+
+def create_all_sources() -> Dict[str, BaseDataSource]:
+    """Create all configured airline sniffer sources."""
+    sources = {}
+    for key in AIRLINE_CONFIGS:
+        try:
+            sources[key] = AirlineSnifferSource(key)
+        except Exception as e:
+            logger.warning(f"Failed to create {key}: {e}")
+    return sources

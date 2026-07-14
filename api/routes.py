@@ -80,13 +80,31 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
 
     @app.route("/api/queries", methods=["GET"])
     def list_queries():
-        queries = db.get_all_queries()
+        scope = request.args.get("scope", "all")  # all|user|seed
+        limit = request.args.get("limit", type=int)
+        offset = request.args.get("offset", 0, type=int)
+        all_queries = db.get_all_queries()
+
+        # Backend filter: drop seed (label with (near)/(far)) when scope=user
+        if scope == "user":
+            queries = [q for q in all_queries
+                       if not (q.label and ("(near)" in q.label or "(far)" in q.label))]
+        elif scope == "seed":
+            queries = [q for q in all_queries
+                       if q.label and ("(near)" in q.label or "(far)" in q.label)]
+        else:
+            queries = all_queries
+
+        if offset:
+            queries = queries[offset:]
+        if limit:
+            queries = queries[:limit]
+
         result = []
         for q in queries:
             stats = db.get_price_stats(q.id)
             latest = db.get_latest_prices(q.id)
             min_price = min((p.price for p in latest), default=0)
-            # Count unique platforms
             platforms = set()
             for p in latest:
                 platforms.add(p.source)
@@ -147,6 +165,15 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
     def delete_query(query_id):
         db.delete_query(query_id)
         return jsonify({"message": "Deleted"})
+
+    @app.route("/api/queries/bulk-delete", methods=["POST"])
+    def bulk_delete_queries():
+        data = request.json or {}
+        ids = data.get("ids", [])
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"error": "ids must be a non-empty list"}), 400
+        db.delete_queries_bulk([int(i) for i in ids])
+        return jsonify({"message": "Deleted", "count": len(ids)})
 
     @app.route("/api/queries/<int:query_id>/monitoring", methods=["PUT"])
     def toggle_monitoring(query_id):
@@ -353,11 +380,17 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
 
     @app.route("/api/dashboard", methods=["GET"])
     def dashboard():
-        queries = db.get_all_queries()
-        monitoring_count = sum(1 for q in queries if q.is_monitoring)
+        all_queries = db.get_all_queries()
+        # Filter out seed data for the dashboard
+        user_queries = [q for q in all_queries
+                        if not (q.label and ("(near)" in q.label or "(far)" in q.label))]
+        user_query_ids = {q.id for q in user_queries}
+        monitoring_count = sum(1 for q in user_queries if q.is_monitoring)
         alert_count = len(db.get_active_alerts())
         history = db.get_alert_history(5)
         all_prices = db.get_all_latest_prices()
+        # Drop prices belonging to seed queries
+        all_prices = [p for p in all_prices if p.get("query_id") in user_query_ids]
 
         route_prices = {}
         for p in all_prices:
@@ -365,11 +398,10 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             if key not in route_prices or p["price"] < route_prices[key]["price"]:
                 route_prices[key] = p
 
-        # Count unique platforms across all data
         all_platforms = set(p.get("source", "") for p in all_prices if p.get("source"))
 
         return jsonify({
-            "total_queries": len(queries),
+            "total_queries": len(user_queries),
             "monitoring_queries": monitoring_count,
             "active_alerts": alert_count,
             "recent_alerts": history,

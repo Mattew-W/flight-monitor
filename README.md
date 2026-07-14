@@ -1,100 +1,129 @@
-# ✈️ 航班价格监控 (Flight Price Monitor)
+# ✈️ Flight Price Monitor — ML-Powered Multi-Platform Price Tracking
 
-基于 Python + Flask + Playwright 的多平台航班价格监控工具，支持携程等 20+ 平台比价、价格趋势预测和降价提醒。
+A Python-based flight price monitoring system with **machine learning price prediction** (Gradient Boosting), multi-platform comparison (27+ channels), price trend analysis, and alert notifications.
 
-## ✨ 功能特性
+## ✨ Features
 
-- **多平台比价**: 携程、去哪儿、飞猪、同程、国航、南航、东航、海航、春秋、吉祥等
-- **携程真实数据**: 通过 Playwright headless 浏览器获取实时航班数据（非模拟）
-- **智能预测**: ARIMA 模型 + 95% 置信区间，预测未来价格走势
-- **降价提醒**: 设置目标价格，邮件/微信通知
-- **数据导出**: CSV 格式导出所有价格记录
+- **ML Price Prediction**: Gradient Boosting Regressor (GBR) with route-aware feature engineering — distance, competition, seasonality, volatility, holiday proximity, and trend features
+- **Multi-Platform Comparison**: 27+ booking channels including Ctrip, Qunar, Fliggy, Tongcheng, major Chinese airlines, Trip.com, Skyscanner, Kayak, Expedia, and more
+- **Data-Driven Forecasting**: Statistical ensemble (Linear Regression + Weighted Moving Average) as reliable fallback when training data is limited
+- **Real Browser Scraping**: Playwright-based fresh-browser-per-search mode to bypass anti-crawl restrictions (Ctrip, Qunar, Fliggy, airline official sites)
+- **Price Alerts**: Set target prices, get notified via Email / ServerChan (WeChat) / Feishu Webhook
+- **Interactive Charts**: Chart.js-powered trend visualization with 95% confidence intervals
+- **One-Click Login Persistence**: Cookie-based session management — log in once, crawl forever
+- **Data Export**: CSV export with UTF-8 BOM for Excel
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 环境要求
+### Requirements
 - Python 3.11+
-- Chrome 浏览器
+- (Optional) Chrome browser — for real-time scraping
 
-### 安装
+### Install
 ```bash
-# 克隆项目
 git clone https://github.com/your-username/flight-monitor.git
 cd flight-monitor
 
-# 创建虚拟环境
 python -m venv .venv
-.venv\Scripts\activate  # Windows
+.venv\Scripts\activate    # Windows
 source .venv/bin/activate  # macOS/Linux
 
-# 安装依赖
 pip install -r requirements.txt
-playwright install chromium
+# Optional: playwright install chromium   # for live Ctrip scraping
 ```
 
-### 启动
+### Launch
 ```bash
 python main.py
-# 打开浏览器访问 http://127.0.0.1:5566
-```
+# Open http://127.0.0.1:5566
 
-或使用一键启动脚本（Windows）:
-```
+# Or use the one-click launcher:
 flight_monitor.bat
 ```
 
-## 📁 项目结构
+### Seed Data (populate routes + prices)
+```bash
+python seed_data.py              # Mock data (27 platforms, 55 routes)
+python seed_data.py --ctrip-only # Try live Ctrip scraping
+```
+
+### One-Time Login (persist cookies)
+```bash
+python tools/login.py ctrip
+```
+
+## 🤖 ML Prediction Pipeline
+
+```
+Historical Prices
+    │
+    ├─ Feature Engineering
+    │   ├─ Route distance (km)
+    │   ├─ Competition level (1-6)
+    │   ├─ Holiday proximity (days)
+    │   ├─ Price volatility (σ/μ)
+    │   ├─ 7-day & 30-day trends
+    │   └─ Cabin class multiplier
+    │
+    ├─ Gradient Boosting Regressor (sklearn or pure-Python)
+    │   ├─ 50 estimators, lr=0.1
+    │   └─ Trained on rolling 1-day-ahead predictions
+    │
+    └─ Output: 7-90 day forecast + 95% CI
+```
+
+## 📁 Project Structure
 
 ```
 flight_monitor/
-├── main.py                 # 入口文件
-├── config.py               # 配置文件（城市、航线、平台信息）
-├── requirements.txt        # Python 依赖
-├── flight_monitor.bat      # 一键启动脚本
+├── main.py              # Web app entry point
+├── seed_data.py          # Route & price data collection
+├── config.py             # Cities, routes, platforms, sources
+├── requirements.txt
+├── flight_monitor.bat   # One-click launcher (Windows)
 │
-├── api/                    # Flask 路由
-│   └── routes.py           # REST API
+├── api/routes.py         # Flask REST API
+├── core/
+│   ├── database.py       # SQLite (WAL mode)
+│   ├── monitor.py        # Background price monitor
+│   ├── aggregator.py     # O(N) cross-platform price synthesis
+│   ├── ml_predictor.py   # GBR ML model + feature engineering
+│   ├── price_prediction.py # Ensemble: ML + LR + WMA
+│   ├── browser_pool.py   # Shared Playwright instances
+│   ├── session_manager.py # Login cookie persistence
+│   ├── models.py, notifier.py
 │
-├── core/                   # 核心模块
-│   ├── database.py         # SQLite 数据库
-│   ├── monitor.py          # 价格监控引擎
-│   ├── models.py           # 数据模型
-│   ├── notifier.py         # 通知提醒
-│   └── price_prediction.py # ARIMA 预测模型
+├── datasources/
+│   ├── mock_source.py              # 27-platform simulated data
+│   ├── ctrip_browser_source.py     # Ctrip H5 browser scraper
+│   ├── skyscanner_source.py        # Skyscanner browse API
+│   ├── amadeus_source.py           # Amadeus REST API (free tier)
+│   ├── multi_platform_scraper.py   # Qunar/Fliggy/Tongcheng/AirChina
+│   └── flight_schedules.py        # ~180 static schedule records
 │
-├── datasources/            # 数据源
-│   ├── mock_source.py      # 模拟数据
-│   └── ctrip_browser_source.py  # 携程浏览器抓取
-│
-├── crawler/                # 爬虫工具
-│   └── extract_real.py     # 真实数据提取
-│
-├── templates/              # HTML 模板
-│   └── index.html
-│
-└── static/                 # 前端资源
-    ├── css/style.css
-    └── js/app.js
+├── static/  (CSS + JS)
+├── templates/ (HTML)
+└── tools/   (login.py, debugging scripts)
 ```
 
-## 🔧 技术栈
+## 📊 Data Sources
 
-- **后端**: Python 3.13 + Flask
-- **数据库**: SQLite + WAL 模式
-- **爬虫**: Playwright (headless Chrome)
-- **预测**: numpy + ARIMA 模型
-- **前端**: Chart.js + 原生 JavaScript
+| Source | Method | Reliability | Data |
+|--------|--------|------------|------|
+| Mock Engine | Deterministic seed | ★★★★★ Always | 55 routes × 27 platforms |
+| Ctrip Browser | Playwright fresh-browser | ★★ IP-dependent | Real-time flight prices |
+| Skyscanner API | curl_cffi HTTP | ★★ Geo-blocked | Browse quotes |
+| Amadeus API | REST (free 2k/mo) | ★★★★★ Official | Flight offers |
 
-## 📊 数据源
+## 🔧 Tech Stack
 
-| 来源 | 方式 | 数据量 |
-|------|------|--------|
-| 携程旅行网 | Playwright 浏览器拦截 | 真实航班数据 |
-| 模拟数据 | 确定性种子生成 | 离线可用 |
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 PR！
+- **Backend**: Python 3.13 + Flask
+- **Database**: SQLite + WAL mode
+- **ML**: GradientBoostingRegressor (sklearn) + pure-Python fallback
+- **Stats**: Linear Regression, Weighted Moving Average, ARIMA-lite
+- **Browser**: Playwright (Chromium headless, fresh-per-search mode)
+- **Frontend**: Chart.js + vanilla JavaScript SPA
+- **Notifications**: SMTP Email, ServerChan (WeChat), Feishu Webhook
 
 ## 📄 License
 

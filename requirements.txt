@@ -1,7 +1,16 @@
 flask>=3.0.0
 requests>=2.31.0
 
-# Optional dependencies (partial functionality without them):
-# numpy>=1.24.0       # ARIMA price prediction model (falls back to simpler model)
-# playwright>=1.40.0  # Ctrip real-time browser data source (falls back to mock data)
-#                     # Requires: playwright install chromium
+# Optional: Skyscanner (no-browser, fast flight data)
+# pip install curl_cffi typeguard orjson
+# pip install git+https://github.com/irrisolto/skyscanner.git
+curl_cffi>=0.7.0
+typeguard>=4.0.0
+orjson>=3.9.0
+
+# Optional: Ctrip browser scraper (heavy, needs Chrome)
+# playwright>=1.40.0
+# playwright install chromium
+
+# Optional: numpy for prediction models
+# numpy>=1.24.0

@@ -260,55 +260,88 @@ async function refreshDashboard() {
 }
 
 // ── Queries ──────────────────────────────────────────────────
+function isSeedQuery(q) {
+    // Seed data labels contain patterns like "京沪线(near)", "跨大西洋(far)", etc.
+    return /\(near\)|\(far\)/.test(q.label || "");
+}
+
+const queryItemTpl = q => `
+    <div class="query-item">
+        <div class="query-info">
+            <div>
+                <div class="query-route">${q.departure} → ${q.destination}</div>
+                <div class="query-meta">
+                    <span>📅 ${q.departure_date}</span>
+                    <span>💺 ${cabinLabel(q.cabin_class)}</span>
+                    <span>📊 ${q.stats.total_records}条记录</span>
+                    ${q.platform_count > 0 ? `<span class="query-platform-count">🔗 ${q.platform_count}个平台</span>` : ""}
+                    ${q.label && q.label !== `${q.departure}→${q.destination}` ? `<span>🏷️ ${q.label}</span>` : ""}
+                </div>
+            </div>
+        </div>
+        <div class="query-actions">
+            ${q.current_min_price > 0 ? `<div class="query-price-badge">最低 ¥${Math.round(q.current_min_price)}</div>` : ""}
+            <div class="toggle ${q.is_monitoring ? "active" : ""}" onclick="toggleMonitoring(${q.id}, ${!q.is_monitoring})" title="${q.is_monitoring ? '停止监控' : '开始监控'}"></div>
+            <button class="btn btn-sm btn-ghost" onclick="searchNow(${q.id})">🔍 搜索</button>
+            <button class="btn btn-sm btn-ghost" onclick="showPricePrediction(${q.id})">📈 预测</button>
+            <button class="btn-icon danger" onclick="deleteQuery(${q.id})" title="删除">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            </button>
+        </div>
+    </div>`;
+
 async function loadQueries() {
     try {
-        const queries = await api("/api/queries");
+        // Fetch user queries (backend filter) for the main list
+        const userQueries = await api("/api/queries?scope=user");
         const list = document.getElementById("queryList");
-        if (queries.length === 0) {
-            list.innerHTML = `<div class="empty-state"><p>暂无监控任务，请在上方添加</p></div>`;
+        if (userQueries.length === 0) {
+            list.innerHTML = `<div class="empty-state"><p>暂无任务，请在上方添加</p></div>`;
         } else {
-            list.innerHTML = queries.map(q => `
-                <div class="query-item">
-                    <div class="query-info">
-                        <div>
-                            <div class="query-route">${q.departure} → ${q.destination}</div>
-                            <div class="query-meta">
-                                <span>📅 ${q.departure_date}</span>
-                                <span>💺 ${cabinLabel(q.cabin_class)}</span>
-                                <span>📊 ${q.stats.total_records}条记录</span>
-                                ${q.platform_count > 0 ? `<span class="query-platform-count">🔗 ${q.platform_count}个平台</span>` : ""}
-                                ${q.label && q.label !== `${q.departure}→${q.destination}` ? `<span>🏷️ ${q.label}</span>` : ""}
-                            </div>
-                        </div>
-                    </div>
-                    <div class="query-actions">
-                        ${q.current_min_price > 0 ? `<div class="query-price-badge">最低 ¥${Math.round(q.current_min_price)}</div>` : ""}
-                        <div class="toggle ${q.is_monitoring ? "active" : ""}" onclick="toggleMonitoring(${q.id}, ${!q.is_monitoring})" title="${q.is_monitoring ? '停止监控' : '开始监控'}"></div>
-                        <button class="btn btn-sm btn-ghost" onclick="searchNow(${q.id})">🔍 搜索</button>
-                        <button class="btn btn-sm btn-ghost" onclick="showPricePrediction(${q.id})">📈 预测</button>
-                        <button class="btn-icon danger" onclick="deleteQuery(${q.id})" title="删除">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-                        </button>
-                    </div>
-                </div>
-            `).join("");
+            list.innerHTML = userQueries.map(queryItemTpl).join("");
         }
-        updateSelects(queries);
+        // Also fetch seed queries (lightweight) for trend/alert dropdowns
+        let seedQueries = [];
+        try {
+            seedQueries = await api("/api/queries?scope=seed");
+        } catch (e) {
+            console.warn("Failed to load seed queries for dropdowns:", e);
+        }
+        updateSelects(userQueries, seedQueries);
     } catch (e) { console.error("Load queries error:", e); }
 }
 
-function updateSelects(queries) {
+function updateSelects(userQueries, seedQueries) {
     const trendSel = document.getElementById("trendQuerySelect");
     const alertSel = document.getElementById("alertQuerySelect");
     const trendVal = trendSel.value;
     const alertVal = alertSel.value;
     trendSel.innerHTML = '<option value="">选择监控任务</option>';
     alertSel.innerHTML = '<option value="">选择监控任务</option>';
-    queries.forEach(q => {
+
+    // User queries first
+    userQueries.forEach(q => {
         const label = `${q.departure}→${q.destination} (${q.departure_date})${q.label && q.label !== `${q.departure}→${q.destination}` ? " " + q.label : ""}`;
         trendSel.add(new Option(label, q.id));
         alertSel.add(new Option(label, q.id));
     });
+
+    // Seed queries grouped under separator
+    if (seedQueries && seedQueries.length > 0) {
+        const sep1 = document.createElement("option");
+        sep1.disabled = true; sep1.textContent = "── 基准数据 ──";
+        trendSel.add(sep1);
+        const sep2 = document.createElement("option");
+        sep2.disabled = true; sep2.textContent = "── 基准数据 ──";
+        alertSel.add(sep2);
+
+        seedQueries.forEach(q => {
+            const label = `${q.departure}→${q.destination} (${q.departure_date}) [基准]`;
+            trendSel.add(new Option(label, q.id));
+            alertSel.add(new Option(label, q.id));
+        });
+    }
+
     trendSel.value = trendVal;
     alertSel.value = alertVal;
 }
@@ -490,7 +523,21 @@ function renderPredictionChart(data) {
     }
     
     const infoEl = document.getElementById("predictionInfo");
+    const profileBadge = data.route_profile_label 
+        ? `<span style="display:inline-block;background:var(--color-background-info);color:var(--color-text-info);padding:3px 10px;border-radius:6px;font-size:12px;margin-right:8px;">${data.route_profile_label}</span>`
+        : "";
+    const buyWindow = data.best_buy_window 
+        ? `<div style="margin-top:12px;padding:8px 12px;background:var(--color-background-success);color:var(--color-text-success);border-radius:8px;font-size:13px;font-weight:500;">💡 ${data.best_buy_window}</div>`
+        : "";
+    const recommendHtml = data.recommendation
+        ? `<div style="margin-top:12px;padding:10px 14px;background:var(--color-background-warning);border-radius:8px;font-size:13px;line-height:1.6;">${data.recommendation}</div>`
+        : "";
+
     infoEl.innerHTML = `
+        <div style="display:flex;align-items:center;margin-bottom:16px;gap:8px;">
+            ${profileBadge}
+            <span style="font-size:12px;color:var(--color-text-secondary);">${data.route_description || ''}</span>
+        </div>
         <div class="prediction-summary">
             <div class="prediction-stat">
                 <div class="prediction-stat-label">当前价格</div>
@@ -510,11 +557,35 @@ function renderPredictionChart(data) {
                 <div class="prediction-stat-value">${data.days_until_departure || 0} 天</div>
             </div>
         </div>
-        <div class="prediction-model">📊 模型：${data.model || '未知'} · 置信区间：${data.confidence_interval || 'N/A'} · 数据点：${data.data_points || 0}</div>
+        ${buyWindow}
+        ${recommendHtml}
+        <div class="prediction-model" style="margin-top:10px;">📊 ${data.model || '未知'} · 置信${data.confidence_interval || 'N/A'} · ${data.data_points || 0}个数据点</div>
         <div class="prediction-source">数据来源：携程旅行网公开最低价日历接口 (m.ctrip.com/restapi/soa2/19691/getLowestPriceCalendar)</div>
     `;
     
     const ctx = document.getElementById("predictionChart").getContext("2d");
+    
+    // Add best-buy star marker if predicted min is below current price
+    if (data.predicted_min_date && data.predicted_min > 0
+        && data.predicted_min < (data.current_price || Infinity)) {
+        const minIdx = labels.indexOf(data.predicted_min_date);
+        if (minIdx >= 0) {
+            const markerData = new Array(labels.length).fill(null);
+            markerData[minIdx] = data.predicted_min;
+            finalDatasets.push({
+                label: "最佳买入点",
+                data: markerData,
+                borderColor: "#10b981",
+                backgroundColor: "#10b981",
+                pointRadius: 8,
+                pointHoverRadius: 12,
+                pointStyle: "star",
+                showLine: false,
+                order: 0,
+            });
+        }
+    }
+    
     window.predictionChart = new Chart(ctx, {
         type: "line",
         data: {

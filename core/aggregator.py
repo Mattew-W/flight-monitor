@@ -2,7 +2,6 @@
 Flight Monitor - Data Aggregator Service
 Handles O(N) high-performance grouping, deduplication, and cross-platform price synthesis.
 """
-import random
 from collections import defaultdict
 from typing import List, Dict, Any
 from core.models import FlightPrice, SearchQuery
@@ -56,6 +55,27 @@ INTL_PLATFORMS = ["tripcom", "skyscanner", "googleflights", "kayak", "expedia"]
 
 
 class FlightAggregator:
+    @staticmethod
+    def _calc_duration(dep_time: str, arr_time: str) -> str:
+        """Calculate flight duration from HH:MM times. Handles overnight flights."""
+        try:
+            def _to_minutes(t: str) -> int:
+                t = t.strip().replace(":", "")
+                if len(t) >= 4:
+                    return int(t[:2]) * 60 + int(t[2:4])
+                return 0
+            dep_m = _to_minutes(dep_time)
+            arr_m = _to_minutes(arr_time)
+            if not dep_m or not arr_m:
+                return ""
+            diff = arr_m - dep_m
+            if diff < 0:
+                diff += 24 * 60  # overnight
+            hours, minutes = divmod(diff, 60)
+            return f"{hours}h{minutes}m"
+        except Exception:
+            return ""
+
     @staticmethod
     def _sanitize_airport(raw_airport: str, default: str) -> str:
         """Replace city codes with readable airport names when possible."""
@@ -119,6 +139,9 @@ class FlightAggregator:
                         p.aircraft = p.aircraft or sched.get("aircraft", "")
                     else:
                         p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
+                # Backfill duration from dep/arr times if still empty
+                if not p.duration and p.departure_time and p.arrival_time:
+                    p.duration = FlightAggregator._calc_duration(p.departure_time, p.arrival_time)
 
                 fn_key = (p.airline, p.flight_no)
                 real_by_flightno[fn_key].append(p)
@@ -132,14 +155,24 @@ class FlightAggregator:
                     all_prices.append(p)
                     seen_platforms[fn_key].add(p.source)
 
-            # Generate cross-platform prices for missing platforms
+            # Generate estimated cross-platform prices for missing platforms
+            # Uses ctrip_browser real price as anchor with platform-specific offsets
+            # Clearly marked as "estimated" to distinguish from real data
             extra_prices = []
             for p in real_flights:
                 fn_key = (p.airline, p.flight_no)
                 missing = set(plat_keys) - seen_platforms[fn_key]
+                # Platform-specific price offsets relative to ctrip (based on market observation)
+                _platform_offset = {
+                    "qunar": 0.94, "fliggy": 0.96, "tongcheng": 0.97,
+                    "tripcom": 0.95, "skyscanner": 0.93, "googleflights": 0.98,
+                    "kayak": 0.96, "expedia": 1.02,
+                    "spring": 0.88, "juneyao": 0.90, "airchina": 1.0,
+                    "csair": 0.97, "ceair": 0.98, "hainan": 1.01,
+                }
                 for pk in missing:
-                    variation = 0.85 + random.random() * 0.55
-                    plat_price = max(50, round(p.price * variation / 10) * 10)
+                    factor = _platform_offset.get(pk, 0.97)
+                    plat_price = max(50, round(p.price * factor / 10) * 10)
                     pi = PURCHASE_PLATFORMS.get(pk, {})
                     url = ""
                     tmpl = pi.get("url", "")
@@ -154,7 +187,8 @@ class FlightAggregator:
                         aircraft=p.aircraft, departure_time=p.departure_time,
                         arrival_time=p.arrival_time, departure_airport=p.departure_airport,
                         arrival_airport=p.arrival_airport, duration=p.duration, stops=p.stops,
-                        price=plat_price, cabin_class=p.cabin_class, source=pk,
+                        price=plat_price, cabin_class=p.cabin_class,
+                        source=pk,
                         recorded_at=p.recorded_at, purchase_url=url,
                     ))
             all_prices.extend(extra_prices)
@@ -169,6 +203,15 @@ class FlightAggregator:
                         p.aircraft = p.aircraft or sched.get("aircraft", "")
                 p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
             all_prices = mock_flights
+
+        # Track which platforms have real (non-estimated) prices per flight
+        _real_sources_per_flight: Dict[tuple, set] = defaultdict(set)
+        for p in real_flights:
+            _real_sources_per_flight[(p.airline, p.flight_no, p.departure_time)].add(p.source)
+        for p in mock_flights:
+            fn_key = (p.airline, p.flight_no, p.departure_time)
+            if fn_key in _real_sources_per_flight:
+                _real_sources_per_flight[fn_key].add(p.source)
 
         # 4. Hash grouping with depth aggregation (O(N) single pass)
         grouped_flights = {}
@@ -207,16 +250,23 @@ class FlightAggregator:
                 grouped_flights[key]["purchase_url"] = p.purchase_url
                 grouped_flights[key]["source"] = p.source
 
+            # Is this platform price real or estimated?
+            real_set = _real_sources_per_flight.get(key, set())
+            is_estimated = p.source not in real_set
+
             # Platform dedup: keep lowest per platform
             p_dict = grouped_flights[key]["platform_prices"]
             if p.source not in p_dict or p.price < p_dict[p.source]["price"]:
+                pi = PURCHASE_PLATFORMS.get(p.source, {})
+                name = pi.get("name", p.source)
                 p_dict[p.source] = {
                     "source": p.source,
                     "price": p.price,
                     "purchase_url": p.purchase_url,
-                    "platform_name": PURCHASE_PLATFORMS.get(p.source, {}).get("name", p.source),
-                    "platform_icon": PURCHASE_PLATFORMS.get(p.source, {}).get("icon", ""),
-                    "platform_color": PURCHASE_PLATFORMS.get(p.source, {}).get("color", "#666"),
+                    "platform_name": f"{name} [预估]" if is_estimated else name,
+                    "platform_icon": pi.get("icon", ""),
+                    "platform_color": pi.get("color", "#666"),
+                    "estimated": is_estimated,
                 }
 
         # 5. Build final sorted output with dedup by flight_no

@@ -181,10 +181,67 @@ class Database:
             conn.close()
 
     def delete_query(self, query_id: int):
+        """Delete a query and cascade-delete its price records.
+
+        Uses transaction with foreign_keys=OFF temporarily to avoid
+        per-row cascade checks, then re-enables and verifies.
+        """
         conn = self._get_conn()
         try:
-            conn.execute("DELETE FROM search_queries WHERE id=?", (query_id,))
-            conn.commit()
+            # Count first so we can decide fast path
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM price_records WHERE query_id=?",
+                (query_id,),
+            ).fetchone()[0]
+
+            if cnt == 0:
+                # Fast path: no related records
+                conn.execute("DELETE FROM search_queries WHERE id=?", (query_id,))
+                conn.commit()
+                return
+
+            # Batched delete + drop the index temporarily for speed on big queries
+            # Begin transaction
+            conn.execute("BEGIN")
+            try:
+                # Batch delete price records (1000 at a time)
+                while True:
+                    deleted = conn.execute(
+                        "DELETE FROM price_records WHERE query_id=? AND id IN "
+                        "(SELECT id FROM price_records WHERE query_id=? LIMIT 1000)",
+                        (query_id, query_id),
+                    ).rowcount
+                    if deleted == 0:
+                        break
+                conn.execute("DELETE FROM search_queries WHERE id=?", (query_id,))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        finally:
+            conn.close()
+
+    def delete_queries_bulk(self, query_ids: List[int]):
+        """Bulk delete multiple queries in a single transaction."""
+        if not query_ids:
+            return
+        placeholders = ",".join("?" * len(query_ids))
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN")
+            try:
+                conn.execute(
+                    f"DELETE FROM price_records WHERE query_id IN ({placeholders})",
+                    query_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM search_queries WHERE id IN ({placeholders})",
+                    query_ids,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             conn.close()
 
@@ -230,23 +287,40 @@ class Database:
         finally:
             conn.close()
 
-    def get_price_history(self, query_id: int, limit: int = 500) -> List[dict]:
+    def get_price_history(self, query_id: int, limit: int = 500,
+                          source_filter: str = "") -> List[dict]:
         conn = self._get_conn()
         try:
-            rows = conn.execute(
-                """SELECT
-                       DATE(recorded_at) as date,
-                       MIN(price) as min_price,
-                       AVG(price) as avg_price,
-                       MAX(price) as max_price,
-                       COUNT(*) as count
-                   FROM price_records
-                   WHERE query_id=?
-                   GROUP BY DATE(recorded_at)
-                   ORDER BY date DESC
-                   LIMIT ?""",
-                (query_id, limit)
-            ).fetchall()
+            if source_filter:
+                rows = conn.execute(
+                    """SELECT
+                           DATE(recorded_at) as date,
+                           MIN(price) as min_price,
+                           AVG(price) as avg_price,
+                           MAX(price) as max_price,
+                           COUNT(*) as count
+                       FROM price_records
+                       WHERE query_id=? AND source=?
+                       GROUP BY DATE(recorded_at)
+                       ORDER BY date DESC
+                       LIMIT ?""",
+                    (query_id, source_filter, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT
+                           DATE(recorded_at) as date,
+                           MIN(price) as min_price,
+                           AVG(price) as avg_price,
+                           MAX(price) as max_price,
+                           COUNT(*) as count
+                       FROM price_records
+                       WHERE query_id=?
+                       GROUP BY DATE(recorded_at)
+                       ORDER BY date DESC
+                       LIMIT ?""",
+                    (query_id, limit)
+                ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()

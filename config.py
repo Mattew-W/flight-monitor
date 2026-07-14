@@ -34,8 +34,17 @@ FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 # Data Sources
 # ==============================================================
 
-# Which data sources are enabled (mock simulates all platforms)
-ENABLED_SOURCES = ["mock", "ctrip_browser"]
+# Which data sources are enabled
+# mock = always works, covers all routes + 27 platforms (PRIMARY)
+# ctrip_browser = real Ctrip data, needs fresh browser + proxy to beat rate-limit
+# skyscanner = Skyscanner browse API (may be blocked in China)
+# amadeus = Amadeus API (free 2k/mo, needs key, may be blocked)
+# multi: qunar, fliggy, tongcheng, airchina (all need browser)
+ENABLED_SOURCES = ["mock"]
+
+# Uncomment lines below to try real scrapers:
+# ENABLED_SOURCES = ["mock", "ctrip_browser"]
+# ENABLED_SOURCES = ["mock", "qunar", "fliggy", "tongcheng"]
 
 # ── Domestic Platform / Purchase Channel Definitions ───────────
 # Each platform has: display name, color, icon, and a URL template
@@ -262,6 +271,10 @@ CTRIP_HEADERS = {
     "Referer": "https://flights.ctrip.com/",
     "Content-Type": "application/json",
 }
+
+# Ctrip Browser Scraper — anti-bot settings
+CTRIP_FRESH_PER_SEARCH = True   # True = new browser per search (avoids rate limit)
+CTRIP_PROXY = os.environ.get("CTRIP_PROXY", "")  # e.g. "http://user:pass@ip:port"
 
 # ── City codes (IATA codes) ───────────────────────────────────
 # 国内城市

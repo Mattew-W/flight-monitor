@@ -10,8 +10,14 @@ from typing import List, Optional
 from .database import Database
 from .models import SearchQuery, FlightPrice, PriceAlert, AlertHistory
 from .notifier import Notifier
-from datasources import MockDataSource, CtripDataSource, CtripBrowserSource
-from config import MONITOR_INTERVAL_SECONDS, ENABLED_SOURCES
+from datasources import (
+    MockDataSource, CtripDataSource,
+    CtripBrowserSource, SkyscannerSource,
+)
+from config import (
+    MONITOR_INTERVAL_SECONDS, ENABLED_SOURCES,
+    CTRIP_FRESH_PER_SEARCH, CTRIP_PROXY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +39,14 @@ class PriceMonitor:
             if src.is_available():
                 self.sources["ctrip"] = src
         if "ctrip_browser" in ENABLED_SOURCES:
-            src = CtripBrowserSource()
+            src = CtripBrowserSource(fresh_per_search=CTRIP_FRESH_PER_SEARCH,
+                                     proxy=CTRIP_PROXY)
             if src.is_available():
                 self.sources["ctrip_browser"] = src
+        if "skyscanner" in ENABLED_SOURCES:
+            src = SkyscannerSource()
+            if src.is_available():
+                self.sources["skyscanner"] = src
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
