@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ctrip_login")
 
-COOKIE_FILE = os.path.join(os.path.dirname(__file__), "ctrip_cookies.json")
+COOKIE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "ctrip_cookies.json")
 
 
 def login_and_save():

@@ -126,17 +126,13 @@ def login_one(platform: str) -> bool:
                 ),
                 "viewport": {"width": 375, "height": 812},
             }
-            out_path = SESSIONS_DIR / f"{platform}.json"
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(session, f, ensure_ascii=False, indent=2)
+            # Save encrypted via SessionManager
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from core.session_manager import SessionManager
+            sm = SessionManager()
+            sm.save(platform, session)
 
-            # 锁定文件权限（仅 Linux/Mac 有效，Windows 跳过）
-            try:
-                os.chmod(out_path, 0o600)
-            except Exception:
-                pass
-
-            print(f"  ✓ Saved {len(cookies)} cookies to {out_path}")
+            print(f"  ✓ Saved {len(cookies)} cookies (encrypted) for {platform}")
             print(f"  ✓ Expires at: {session['expires_at']}")
             browser.close()
             return True
