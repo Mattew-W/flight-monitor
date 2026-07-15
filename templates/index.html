@@ -3,16 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="航班价格监控与预测系统 - 28渠道比价 + AI价格趋势预测">
     <title>航班价格监控 · Flight Monitor</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script>
+        if (typeof Chart === "undefined") {
+            document.write('<script src="/static/js/chart.umd.min.js"><\/script>');
+        }
+    </script>
 </head>
 <body>
+<!-- Mobile Menu Toggle -->
+<button class="mobile-menu-toggle" id="mobileMenuToggle" aria-label="打开菜单" onclick="toggleMobileMenu()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+</button>
+
+<!-- Sidebar Overlay -->
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleMobileMenu()"></div>
+
 <div id="app">
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar" role="navigation" aria-label="主导航">
         <div class="sidebar-header">
-            <div class="logo">
+            <div class="logo" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
                 </svg>
@@ -23,50 +37,70 @@
             </div>
         </div>
         <nav class="sidebar-nav">
-            <a class="nav-item active" data-page="dashboard">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            <a class="nav-item active" data-page="dashboard" role="tab" aria-selected="true" aria-controls="page-dashboard" tabindex="0">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
                 <span>仪表盘</span>
             </a>
-            <a class="nav-item" data-page="search">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <a class="nav-item" data-page="search" role="tab" aria-selected="false" aria-controls="page-search" tabindex="0">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
                 <span>搜索比价</span>
             </a>
-            <a class="nav-item" data-page="trends">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+            <a class="nav-item" data-page="trends" role="tab" aria-selected="false" aria-controls="page-trends" tabindex="0">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
                 <span>价格趋势</span>
             </a>
-            <a class="nav-item" data-page="alerts">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <a class="nav-item" data-page="alerts" role="tab" aria-selected="false" aria-controls="page-alerts" tabindex="0">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
                 <span>提醒管理</span>
             </a>
-            <a class="nav-item" data-page="platforms">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+            <a class="nav-item" data-page="quick" role="tab" aria-selected="false" aria-controls="page-quick" tabindex="0">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                <span>快速预测</span>
+            </a>
+            <a class="nav-item" data-page="platforms" role="tab" aria-selected="false" aria-controls="page-platforms" tabindex="0">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
                 <span>购买渠道</span>
             </a>
         </nav>
         <div class="sidebar-footer">
-            <div class="monitor-status" id="monitorStatus">
-                <div class="status-dot stopped"></div>
+            <div class="monitor-status" id="monitorStatus" aria-live="polite">
+                <div class="status-dot stopped" aria-hidden="true"></div>
                 <span>监控未运行</span>
             </div>
-            <button class="btn-toggle-monitor" id="toggleMonitorBtn" onclick="toggleMonitor()">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <button class="btn-toggle-monitor" id="toggleMonitorBtn" onclick="toggleMonitor()" aria-label="启动或停止监控">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 <span>启动监控</span>
+            </button>
+            <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" aria-label="切换暗色/亮色模式" style="margin-top:10px;justify-content:center;">
+                <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+                <span id="themeLabel">暗色</span>
             </button>
         </div>
     </aside>
 
     <!-- Main Content -->
-    <main class="main-content">
+    <main class="main-content" role="main">
         <!-- Dashboard Page -->
-        <div class="page active" id="page-dashboard">
+        <section class="page active" id="page-dashboard" role="tabpanel" aria-labelledby="nav-dashboard">
             <div class="page-header">
                 <h1>仪表盘</h1>
-                <p class="page-subtitle">航班价格监控总览</p>
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <span class="freshness" id="dashboardFreshness" aria-label="数据更新时间">
+                        <span class="freshness-dot"></span>
+                        <span>更新中...</span>
+                    </span>
+                    <p class="page-subtitle" style="margin-bottom:0;">航班价格监控总览</p>
+                </div>
             </div>
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-icon" style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#2563eb;">
+            <div class="quick-stats" id="quickStats">
+                <span class="quick-stat">📊 监控中: <span class="quick-stat-value" id="qsMonitoring">0</span> 条</span>
+                <span class="quick-stat">📉 今日最低价: <span class="quick-stat-value" id="qsLowest">--</span></span>
+                <span class="quick-stat">🔔 活跃提醒: <span class="quick-stat-value" id="qsAlerts">0</span> 条</span>
+                <span class="quick-stat">🔗 数据来源: <span class="quick-stat-value" id="qsPlatforms">0</span> 个平台</span>
+            </div>
+            <div class="stats-grid" role="list" aria-label="统计概览">
+                <div class="stat-card" role="listitem">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#2563eb;" aria-hidden="true">
                         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
                     </div>
                     <div class="stat-info">
@@ -74,8 +108,8 @@
                         <div class="stat-label">监控任务</div>
                     </div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-icon" style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#16a34a;">
+                <div class="stat-card" role="listitem">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#16a34a;" aria-hidden="true">
                         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                     </div>
                     <div class="stat-info">
@@ -83,8 +117,8 @@
                         <div class="stat-label">运行中</div>
                     </div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-icon" style="background:linear-gradient(135deg,#fef3c7,#fde68a);color:#d97706;">
+                <div class="stat-card" role="listitem">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#fef3c7,#fde68a);color:#d97706;" aria-hidden="true">
                         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
                     </div>
                     <div class="stat-info">
@@ -92,8 +126,8 @@
                         <div class="stat-label">活跃提醒</div>
                     </div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-icon" style="background:linear-gradient(135deg,#fce7f3,#fbcfe8);color:#db2777;">
+                <div class="stat-card" role="listitem">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#fce7f3,#fbcfe8);color:#db2777;" aria-hidden="true">
                         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
                     </div>
                     <div class="stat-info">
@@ -101,8 +135,8 @@
                         <div class="stat-label">最低价(元)</div>
                     </div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-icon" style="background:linear-gradient(135deg,#e0e7ff,#c7d2fe);color:#4f46e5;">
+                <div class="stat-card" role="listitem">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#e0e7ff,#c7d2fe);color:#4f46e5;" aria-hidden="true">
                         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
                     </div>
                     <div class="stat-info">
@@ -112,14 +146,28 @@
                 </div>
             </div>
 
-            <!-- Popular Routes Quick Access -->
             <div class="card">
                 <div class="card-header">
                     <h3>热门航线快速搜索</h3>
                     <span class="card-hint">点击直达</span>
                 </div>
                 <div class="card-body">
-                    <div id="popularRoutes" class="popular-routes-grid"></div>
+                    <div id="popularRoutes" class="popular-routes-grid" role="list" aria-label="热门航线"></div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header">
+                    <h3>我的监控任务</h3>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-sm btn-ghost" onclick="loadDashboardQueries()" aria-label="刷新任务列表">刷新</button>
+                        <button class="btn btn-sm btn-primary" onclick="document.querySelector('.nav-item[data-page=search]').click()">+ 添加任务</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="dashboardQueryList" class="query-list" role="list" aria-label="监控任务列表">
+                        <div class="empty-state"><p>暂无任务，请在上方"搜索比价"页面添加</p></div>
+                    </div>
                 </div>
             </div>
 
@@ -127,12 +175,12 @@
                 <div class="card col-2">
                     <div class="card-header">
                         <h3>航线价格概览</h3>
-                        <button class="btn btn-sm btn-ghost" onclick="refreshDashboard()">刷新</button>
+                        <button class="btn btn-sm btn-ghost" onclick="refreshDashboard()" aria-label="刷新价格概览">刷新</button>
                     </div>
                     <div class="card-body">
-                        <div id="routePriceList" class="route-price-list">
+                        <div id="routePriceList" class="route-price-list" role="list" aria-label="价格概览">
                             <div class="empty-state">
-                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#cbd5e1" stroke-width="1.5"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
+                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#cbd5e1" stroke-width="1.5" aria-hidden="true"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
                                 <p>暂无监控数据，请先添加监控任务</p>
                             </div>
                         </div>
@@ -143,64 +191,63 @@
                         <h3>最近提醒</h3>
                     </div>
                     <div class="card-body">
-                        <div id="recentAlerts" class="alert-list">
+                        <div id="recentAlerts" class="alert-list" role="list" aria-label="最近提醒">
                             <div class="empty-state">
-                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#cbd5e1" stroke-width="1.5"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#cbd5e1" stroke-width="1.5" aria-hidden="true"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
                                 <p>暂无提醒记录</p>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
 
         <!-- Search Page -->
-        <div class="page" id="page-search">
+        <section class="page" id="page-search" role="tabpanel" aria-labelledby="nav-search">
             <div class="page-header">
                 <h1>搜索比价</h1>
                 <p class="page-subtitle">一键搜索多平台机票价格，横向比价找到最优惠渠道</p>
             </div>
 
-            <!-- Popular Routes Quick Access -->
             <div class="card">
                 <div class="card-header">
                     <h3>热门航线</h3>
                     <span class="card-hint">一键填入</span>
                 </div>
                 <div class="card-body">
-                    <div id="popularRoutesSearch" class="popular-routes-grid"></div>
+                    <div id="popularRoutesSearch" class="popular-routes-grid" role="list" aria-label="热门航线快捷选择"></div>
                 </div>
             </div>
 
             <div class="search-form-card card">
                 <div class="card-body">
-                    <form id="searchForm" class="search-form">
+                    <form id="searchForm" class="search-form" aria-label="航班搜索表单">
                         <div class="form-row">
                             <div class="form-group">
-                                <label>出发城市</label>
-                                <select id="departure" class="form-select" required>
+                                <label for="departure">出发城市</label>
+                                <select id="departure" class="form-select" required aria-required="true">
                                     <option value="">选择出发城市</option>
                                 </select>
                             </div>
                             <div class="form-group swap-btn-group">
-                                <button type="button" class="swap-btn" onclick="swapCities()" title="交换城市">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3l4 4-4 4"/><path d="M20 7H4"/><path d="M8 21l-4-4 4-4"/><path d="M4 17h16"/></svg>
+                                <button type="button" class="swap-btn" onclick="swapCities()" title="交换城市" aria-label="交换出发和目的城市">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M16 3l4 4-4 4"/><path d="M20 7H4"/><path d="M8 21l-4-4 4-4"/><path d="M4 17h16"/></svg>
                                 </button>
                             </div>
                             <div class="form-group">
-                                <label>目的城市</label>
-                                <select id="destination" class="form-select" required>
+                                <label for="destination">目的城市</label>
+                                <select id="destination" class="form-select" required aria-required="true">
                                     <option value="">选择目的城市</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label>出发日期</label>
-                                <input type="date" id="departureDate" class="form-input" required>
+                                <label for="departureDate">出发日期</label>
+                                <input type="date" id="departureDate" class="form-input" required aria-required="true">
                             </div>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label>舱位</label>
+                                <label for="cabinClass">舱位</label>
                                 <select id="cabinClass" class="form-select">
                                     <option value="economy">经济舱</option>
                                     <option value="business">商务舱</option>
@@ -208,12 +255,12 @@
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label>任务名称（可选）</label>
+                                <label for="label">任务名称（可选）</label>
                                 <input type="text" id="label" class="form-input" placeholder="如：暑期回家">
                             </div>
                             <div class="form-group form-actions">
                                 <button type="submit" class="btn btn-primary btn-lg">
-                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
                                     搜索比价
                                 </button>
                             </div>
@@ -225,50 +272,92 @@
             <div class="card">
                 <div class="card-header">
                     <h3>我的任务</h3>
-                    <button class="btn btn-sm btn-ghost" onclick="exportAllData()">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <button class="btn btn-sm btn-ghost" onclick="exportAllData()" aria-label="导出所有数据">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                         导出数据
                     </button>
                 </div>
                 <div class="card-body">
-                    <div id="queryList" class="query-list">
+                    <!-- Batch Action Bar for Queries -->
+                    <div class="batch-action-bar" id="queryBatchBar">
+                        <input type="checkbox" class="batch-checkbox-all" id="queryBatchAll" onchange="toggleSelectAllQueries(this.checked)" aria-label="全选">
+                        <label for="queryBatchAll">全选</label>
+                        <span class="batch-count" id="queryBatchCount">已选 0</span>
+                        <span class="batch-spacer"></span>
+                        <button class="batch-btn batch-btn-danger" id="queryBatchDelete" onclick="batchDeleteQueries()" disabled>
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                            删除选中
+                        </button>
+                        <button class="batch-btn batch-btn-clear" id="queryBatchClear" onclick="clearAllQueries()" disabled>
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            清空所有
+                        </button>
+                    </div>
+                    <div id="queryList" class="query-list" role="list" aria-label="任务列表">
                         <div class="empty-state"><p>暂无任务，请在上方添加</p></div>
                     </div>
                 </div>
             </div>
 
             <!-- Search Results Modal -->
-            <div id="searchResultsModal" class="modal" style="display:none;">
+            <div id="searchResultsModal" class="modal" role="dialog" aria-modal="true" aria-label="搜索结果" style="display:none;">
                 <div class="modal-content modal-xl">
                     <div class="modal-header">
                         <h3>搜索结果 · 多平台比价</h3>
-                        <button class="modal-close" onclick="closeModal('searchResultsModal')">&times;</button>
+                        <button class="modal-close" onclick="closeModal('searchResultsModal')" aria-label="关闭">&times;</button>
                     </div>
                     <div class="modal-body">
                         <div id="searchResults"></div>
+                        <!-- Filter Bar (injected by JS) -->
+                        <div id="filterBar" class="filter-bar" style="display:none;">
+                            <div class="filter-group">
+                                <span class="filter-label">航班</span>
+                                <button class="filter-chip active" data-filter="stops" data-value="all">全部</button>
+                                <button class="filter-chip" data-filter="stops" data-value="direct">直飞</button>
+                                <button class="filter-chip" data-filter="stops" data-value="transfer">中转</button>
+                            </div>
+                            <div class="filter-divider"></div>
+                            <div class="filter-group">
+                                <span class="filter-label">出发</span>
+                                <button class="filter-chip active" data-filter="time" data-value="all">全天</button>
+                                <button class="filter-chip" data-filter="time" data-value="morning">上午</button>
+                                <button class="filter-chip" data-filter="time" data-value="afternoon">下午</button>
+                                <button class="filter-chip" data-filter="time" data-value="evening">晚上</button>
+                            </div>
+                            <div class="filter-divider"></div>
+                            <div class="filter-group">
+                                <span class="filter-label">价格</span>
+                                <div class="filter-range">
+                                    <input type="number" id="filterPriceMin" placeholder="最低" min="0">
+                                    <span>—</span>
+                                    <input type="number" id="filterPriceMax" placeholder="最高" min="0">
+                                </div>
+                            </div>
+                            <span class="filter-reset" onclick="resetFilters()">重置</span>
+                        </div>
                     </div>
                 </div>
             </div>
 
             <!-- Price Prediction Modal -->
-            <div id="predictionModal" class="modal" style="display:none;">
+            <div id="predictionModal" class="modal" role="dialog" aria-modal="true" aria-label="价格预测" style="display:none;">
                 <div class="modal-content modal-xl">
                     <div class="modal-header">
                         <h3 id="predictionTitle">价格预测 · 未来走势</h3>
-                        <button class="modal-close" onclick="closeModal('predictionModal')">&times;</button>
+                        <button class="modal-close" onclick="closeModal('predictionModal')" aria-label="关闭">&times;</button>
                     </div>
                     <div class="modal-body">
                         <div class="prediction-info" id="predictionInfo"></div>
                         <div class="chart-container" style="height:400px;">
-                            <canvas id="predictionChart"></canvas>
+                            <canvas id="predictionChart" role="img" aria-label="价格预测图表"></canvas>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
 
         <!-- Trends Page -->
-        <div class="page" id="page-trends">
+        <section class="page" id="page-trends" role="tabpanel" aria-labelledby="nav-trends">
             <div class="page-header">
                 <h1>价格趋势</h1>
                 <p class="page-subtitle">查看历史价格变化走势，把握最佳购票时机</p>
@@ -278,7 +367,7 @@
                     <h3>选择航线</h3>
                 </div>
                 <div class="card-body">
-                    <select id="trendQuerySelect" class="form-select" onchange="loadTrendChart()">
+                    <select id="trendQuerySelect" class="form-select" onchange="loadTrendChart()" aria-label="选择监控任务">
                         <option value="">选择监控任务</option>
                     </select>
                 </div>
@@ -286,7 +375,7 @@
             <div class="card">
                 <div class="card-header">
                     <h3 id="trendTitle">价格走势图</h3>
-                    <div class="trend-legend">
+                    <div class="trend-legend" aria-hidden="true">
                         <span class="legend-item"><span class="legend-dot" style="background:#2563eb;"></span>最低价</span>
                         <span class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span>平均价</span>
                         <span class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span>最高价</span>
@@ -294,7 +383,7 @@
                 </div>
                 <div class="card-body">
                     <div class="chart-container">
-                        <canvas id="priceChart"></canvas>
+                        <canvas id="priceChart" role="img" aria-label="价格走势图表"></canvas>
                     </div>
                 </div>
             </div>
@@ -313,10 +402,10 @@
                     <div id="trendFlights" class="flight-table-wrap"></div>
                 </div>
             </div>
-        </div>
+        </section>
 
         <!-- Alerts Page -->
-        <div class="page" id="page-alerts">
+        <section class="page" id="page-alerts" role="tabpanel" aria-labelledby="nav-alerts">
             <div class="page-header">
                 <h1>提醒管理</h1>
                 <p class="page-subtitle">设置价格阈值，自动接收降价通知</p>
@@ -324,21 +413,21 @@
             <div class="card">
                 <div class="card-header"><h3>添加价格提醒</h3></div>
                 <div class="card-body">
-                    <form id="alertForm" class="alert-form">
+                    <form id="alertForm" class="alert-form" aria-label="添加提醒表单">
                         <div class="form-row">
                             <div class="form-group">
-                                <label>选择航线</label>
-                                <select id="alertQuerySelect" class="form-select" required>
+                                <label for="alertQuerySelect">选择航线</label>
+                                <select id="alertQuerySelect" class="form-select" required aria-required="true">
                                     <option value="">选择监控任务</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label>目标价格（元）</label>
-                                <input type="number" id="alertTargetPrice" class="form-input" placeholder="如 800" required min="0">
+                                <label for="alertTargetPrice">目标价格（元）</label>
+                                <input type="number" id="alertTargetPrice" class="form-input" placeholder="如 800" required min="0" aria-required="true">
                             </div>
                             <div class="form-group form-actions">
                                 <button type="submit" class="btn btn-primary">
-                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
                                     添加提醒
                                 </button>
                             </div>
@@ -349,7 +438,22 @@
             <div class="card">
                 <div class="card-header"><h3>提醒列表</h3></div>
                 <div class="card-body">
-                    <div id="alertList" class="alert-config-list">
+                    <!-- Batch Action Bar for Alerts -->
+                    <div class="batch-action-bar" id="alertBatchBar">
+                        <input type="checkbox" class="batch-checkbox-all" id="alertBatchAll" onchange="toggleSelectAllAlerts(this.checked)" aria-label="全选">
+                        <label for="alertBatchAll">全选</label>
+                        <span class="batch-count" id="alertBatchCount">已选 0</span>
+                        <span class="batch-spacer"></span>
+                        <button class="batch-btn batch-btn-danger" id="alertBatchDelete" onclick="batchDeleteAlerts()" disabled>
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                            删除选中
+                        </button>
+                        <button class="batch-btn batch-btn-clear" id="alertBatchClear" onclick="clearAllAlerts()" disabled>
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            清空所有
+                        </button>
+                    </div>
+                    <div id="alertList" class="alert-config-list" role="list" aria-label="提醒配置列表">
                         <div class="empty-state"><p>暂无价格提醒</p></div>
                     </div>
                 </div>
@@ -357,15 +461,75 @@
             <div class="card">
                 <div class="card-header"><h3>提醒历史</h3></div>
                 <div class="card-body">
-                    <div id="alertHistoryList" class="alert-history-list">
+                    <div id="alertHistoryList" class="alert-history-list" role="list" aria-label="提醒历史记录">
                         <div class="empty-state"><p>暂无提醒记录</p></div>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
+
+        <!-- Quick Predict Page -->
+        <section class="page" id="page-quick" role="tabpanel" aria-labelledby="nav-quick">
+            <div class="page-header">
+                <h1>快速预测</h1>
+                <p class="page-subtitle">输入航班号，自动识别航线+实时拉价+生成预测</p>
+            </div>
+            <div class="card">
+                <div class="card-body">
+                    <form id="quickPredictForm" class="search-form" aria-label="快速预测表单">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="qpFlightNo">航班号</label>
+                                <input type="text" id="qpFlightNo" class="form-input" placeholder="如 MU5101, CA1501" required aria-required="true" style="width:160px;text-transform:uppercase;">
+                            </div>
+                            <div class="form-group" id="qpDepGroup" style="display:none;">
+                                <label for="qpDeparture">出发地</label>
+                                <input type="text" id="qpDeparture" class="form-input" placeholder="如 北京" style="width:100px;">
+                            </div>
+                            <div class="form-group" id="qpArrGroup" style="display:none;">
+                                <label for="qpDestination">目的地</label>
+                                <input type="text" id="qpDestination" class="form-input" placeholder="如 上海" style="width:100px;">
+                            </div>
+                            <div class="form-group">
+                                <label for="qpDate">出发日期</label>
+                                <input type="date" id="qpDate" class="form-input" required aria-required="true">
+                            </div>
+                            <div class="form-group">
+                                <label for="qpCabin">舱位</label>
+                                <select id="qpCabin" class="form-select">
+                                    <option value="economy">经济舱</option>
+                                    <option value="business">公务舱</option>
+                                    <option value="first">头等舱</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="qpPrice">当前看到的价格 (元)</label>
+                                <input type="number" id="qpPrice" class="form-input" placeholder="如 450" min="1" style="width:140px;">
+                                <button type="button" id="qpFetchBtn" class="btn btn-secondary" style="margin-top:6px;font-size:12px;padding:4px 10px;" onclick="fetchLivePrice()">🔄 实时拉价</button>
+                            </div>
+                            <div class="form-group form-actions">
+                                <button type="submit" class="btn btn-primary btn-lg">🔮 生成预测</button>
+                            </div>
+                        </div>
+                        <div class="form-row" id="qpFlightInfo" style="display:none;margin-top:8px;">
+                            <span style="color:var(--text-secondary);font-size:13px;" id="qpFlightInfoText" role="status" aria-live="polite"></span>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <div class="card" id="quickResultCard" style="display:none;">
+                <div class="card-header"><h3>预测结果</h3></div>
+                <div class="card-body">
+                    <div id="quickResultInfo" class="prediction-info"></div>
+                    <div class="chart-container" style="height:400px;">
+                        <canvas id="quickPredictChart" role="img" aria-label="快速预测图表"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
 
         <!-- Platforms Page -->
-        <div class="page" id="page-platforms">
+        <section class="page" id="page-platforms" role="tabpanel" aria-labelledby="nav-platforms">
             <div class="page-header">
                 <h1>购买渠道</h1>
                 <p class="page-subtitle">支持的机票预订平台和航司官网一览（国内+国际共20+渠道）</p>
@@ -376,7 +540,7 @@
                     <span class="card-hint">国内4家 + 国际5家</span>
                 </div>
                 <div class="card-body">
-                    <div id="otaPlatforms" class="platform-grid"></div>
+                    <div id="otaPlatforms" class="platform-grid" role="list" aria-label="OTA平台列表"></div>
                 </div>
             </div>
             <div class="card">
@@ -385,7 +549,7 @@
                     <span class="card-hint">国内6家 + 国际8家</span>
                 </div>
                 <div class="card-body">
-                    <div id="airlinePlatforms" class="platform-grid"></div>
+                    <div id="airlinePlatforms" class="platform-grid" role="list" aria-label="航空公司官网列表"></div>
                 </div>
             </div>
             <div class="card">
@@ -393,35 +557,35 @@
                 <div class="card-body">
                     <div class="info-list">
                         <div class="info-item">
-                            <div class="info-icon">1</div>
+                            <div class="info-icon" aria-hidden="true">1</div>
                             <div class="info-text">在「搜索比价」页面选择出发地、目的地和日期，支持<strong>国内城市和海外城市</strong></div>
                         </div>
                         <div class="info-item">
-                            <div class="info-icon">2</div>
+                            <div class="info-icon" aria-hidden="true">2</div>
                             <div class="info-text">国内航线自动查询携程、去哪儿、飞猪、同程及国内航司官网；<strong>国际航线自动查询 Trip.com、Skyscanner、Google Flights、Kayak、Expedia 及国际航司官网</strong></div>
                         </div>
                         <div class="info-item">
-                            <div class="info-icon">3</div>
+                            <div class="info-icon" aria-hidden="true">3</div>
                             <div class="info-text">搜索结果按价格排序，每个航班显示各平台比价，点击「去购买」直达订票页面</div>
                         </div>
                         <div class="info-item">
-                            <div class="info-icon">4</div>
+                            <div class="info-icon" aria-hidden="true">4</div>
                             <div class="info-text">在「提醒管理」设置目标价格，价格低于阈值时自动通知</div>
                         </div>
                         <div class="info-item">
-                            <div class="info-icon">5</div>
+                            <div class="info-icon" aria-hidden="true">5</div>
                             <div class="info-text">开启监控后，系统每5分钟自动刷新价格，在「价格趋势」查看走势图</div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
     </main>
 </div>
 
-<!-- Toast notification -->
-<div id="toast" class="toast"></div>
+<!-- Toast container (stack) -->
+<div class="toast-container" id="toastContainer" role="alert" aria-live="assertive"></div>
 
-<script src="/static/js/app.js?v=5"></script>
+<script src="/static/js/app.js?v=12"></script>
 </body>
 </html>
