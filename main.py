@@ -63,6 +63,11 @@ def main():
     finally:
         logger.info("Shutting down monitor...")
         monitor.stop()
+        # Close ALL thread-local connections (not just this thread's).
+        try:
+            db.close_all()
+        except Exception as e:
+            logger.warning(f"db.close_all() error: {e}")
         logger.info("Goodbye!")
 
 

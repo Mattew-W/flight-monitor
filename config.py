@@ -40,11 +40,12 @@ FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 # skyscanner = Skyscanner browse API (may be blocked in China)
 # amadeus = Amadeus API (free 2k/mo, needs key, may be blocked)
 # multi: qunar, fliggy, tongcheng, airchina (all need browser)
-ENABLED_SOURCES = ["mock"]
+ENABLED_SOURCES = ["mock", "bing"]
 
 # Uncomment lines below to try real scrapers:
 # ENABLED_SOURCES = ["mock", "ctrip_browser"]
 # ENABLED_SOURCES = ["mock", "qunar", "fliggy", "tongcheng"]
+# ENABLED_SOURCES = ["mock", "bing", "ctrip_browser"]
 
 # ── Domestic Platform / Purchase Channel Definitions ───────────
 # Each platform has: display name, color, icon, and a URL template
@@ -258,10 +259,10 @@ AIRLINE_OFFICIAL_SITES = {
     "美国航空": "americanairlines",
     "达美航空": "americanairlines",
     "美联航": "americanairlines",
-    "土耳其航空": "qatar",
+    "土耳其航空": "turkishairlines",
     "泰国航空": "thaiairways",
-    "马来西亚航空": "singapore",
-    "越南航空": "singapore",
+    "马来西亚航空": "malaysiaairlines",
+    "越南航空": "vietnamairlines",
 }
 
 # Ctrip API

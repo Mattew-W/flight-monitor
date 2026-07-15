@@ -1,118 +1,97 @@
 @echo off
 chcp 65001 >nul 2>&1
 title Flight Price Monitor
+cd /d "%~dp0"
+
+rem -- find python --
+set PY=python
+where python >nul 2>&1
+if errorlevel 1 (
+    if exist ".venv\Scripts\python.exe" set PY=.venv\Scripts\python.exe
+)
 
 :MENU
 cls
 echo.
 echo  ============================================
-echo            Flight Price Monitor
+echo     Flight Price Monitor
 echo  ============================================
-echo.
-echo   [1] Start Server    (Launch web UI)
-echo   [2] Stop Server     (Kill process)
-echo   [3] Check Status    (Is it running?)
-echo   [4] Open Browser    (http://127.0.0.1:5566)
-echo   [5] Install Dependencies
-echo   [6] Reset Database  (Delete all data)
+echo   [1] Start (seed + backfill + server)
+echo   [2] Stop server
+echo   [3] Status
+echo   [4] Open browser (http://127.0.0.1:5566)
+echo   [5] Reset database
 echo   [0] Exit
-echo.
-set /p choice="Enter choice: "
+echo  ============================================
+set /p choice="> "
 
 if "%choice%"=="1" goto START
 if "%choice%"=="2" goto STOP
 if "%choice%"=="3" goto STATUS
 if "%choice%"=="4" goto BROWSER
-if "%choice%"=="5" goto INSTALL
-if "%choice%"=="6" goto RESET
+if "%choice%"=="5" goto RESET
 if "%choice%"=="0" goto END
 goto MENU
 
-:START
+::START
 echo.
-echo  Starting Flight Monitor...
-cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-    echo  Creating virtual environment...
-    python -m venv .venv
+echo ============================================
+echo   Launching Flight Monitor...
+echo ============================================
+echo.
+if not exist "flight_monitor.db" (
+    echo [1/3] Seeding data (56 routes, mock)...
+    %PY% seed_data.py --mock-only -w 16
+    if errorlevel 1 (echo Seed failed! & pause & goto MENU)
 )
-if not exist ".venv\Scripts\flask.exe" (
-    echo  Installing dependencies...
-    .venv\Scripts\pip install flask requests >nul 2>&1
-)
-echo  Launching server at http://127.0.0.1:5566 ...
-start "" .venv\Scripts\python.exe main.py
+echo [2/3] Backfilling history for ML...
+%PY% backfill_history.py
+echo [3/3] Starting server...
+echo Set WshShell = CreateObject("WScript.Shell") > _s.vbs
+echo WshShell.Run "%PY% main.py", 0, False >> _s.vbs
+cscript //nologo _s.vbs & del _s.vbs
 timeout /t 3 >nul
-echo.
-echo  Server started! Opening browser...
+echo Opening browser...
 start "" http://127.0.0.1:5566
 echo.
-pause
+echo Done! Server running in background.
+echo Close this window or press any key...
+pause >nul
 goto MENU
 
-:STOP
+::STOP
 echo.
-echo  Stopping Flight Monitor...
+echo Stopping server...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5566" ^| findstr "LISTENING"') do (
     taskkill /PID %%a /F >nul 2>&1
-    echo  Process PID %%a terminated.
+    echo Process %%a killed.
 )
-taskkill /fi "WINDOWTITLE eq Flight Price Monitor*" /f >nul 2>&1
-echo  Done.
-echo.
-pause
+echo Done.
+pause >nul
 goto MENU
 
-:STATUS
+::STATUS
 echo.
 netstat -aon | findstr ":5566" | findstr "LISTENING" >nul 2>&1
-if %errorlevel%==0 (
-    echo  [RUNNING] Server is online at http://127.0.0.1:5566
-) else (
-    echo  [STOPPED] Server is not running.
-)
-echo.
-pause
+if errorlevel 1 (echo [STOPPED]) else (echo [RUNNING] http://127.0.0.1:5566)
+pause >nul
 goto MENU
 
-:BROWSER
-echo.
-echo  Opening browser...
+::BROWSER
 start "" http://127.0.0.1:5566
-timeout /t 1 >nul
 goto MENU
 
-:INSTALL
+::RESET
 echo.
-cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-    echo  Creating virtual environment...
-    python -m venv .venv
-)
-echo  Installing dependencies...
-.venv\Scripts\pip install flask requests
-echo.
-echo  Done!
-pause
-goto MENU
-
-:RESET
-echo.
-set /p confirm="  WARNING: This will delete ALL data. Type YES to confirm: "
-if not "%confirm%"=="YES" (
-    echo  Cancelled.
-    pause
-    goto MENU
-)
-cd /d "%~dp0"
-if exist "flight_monitor.db" del /f /q "flight_monitor.db"
-if exist "flight_monitor.db-wal" del /f /q "flight_monitor.db-wal"
-if exist "flight_monitor.db-shm" del /f /q "flight_monitor.db-shm"
-echo  Database deleted. All data cleared.
-echo.
-pause
+set /p confirm="Delete ALL data? Type YES: "
+if not "%confirm%"=="YES" goto MENU
+if exist "flight_monitor.db"       del /f /q "flight_monitor.db"
+if exist "flight_monitor.db-wal"   del /f /q "flight_monitor.db-wal"
+if exist "flight_monitor.db-shm"   del /f /q "flight_monitor.db-shm"
+echo Database cleared.
+pause >nul
 goto MENU
 
 :END
-echo  Bye!
+echo Bye!
 exit /b 0

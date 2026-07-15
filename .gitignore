@@ -25,15 +25,20 @@ Thumbs.db
 
 # Project data
 *.log
-ctrip_cookies.json
+data/ctrip_cookies.json
 sessions/
 nul
-airchina_debug.png
-all_api_calls.json
-api_discovery.json
-flight_list_results.json
-flight_list_search_response.json
-list_api_discovery.json
+data/airchina_debug.png
+data/all_api_calls.json
+data/api_discovery.json
+data/flight_list_results.json
+data/flight_list_search_response.json
+data/list_api_discovery.json
+data/ctrip_api_calls.json
+data/ctrip_api_calls_full.json
+data/ctrip_real_flights.json
+data/ctrip_flight_page.html
+data/bing_route_cache.json
 
 # .codebuddy (local AI assistant)
 .codebuddy/
