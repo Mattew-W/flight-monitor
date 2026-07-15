@@ -1,35 +1,56 @@
 """
-Flight Monitor - Shared Browser Pool (v1)
-Thread-safe Playwright browser lifecycle management.
-Multiple data sources share a single Chromium instance.
+Flight Monitor - Shared Browser Pool (v4 — Async)
+Single Chromium process, per-platform context isolation.
+All I/O is async — one event loop drives N concurrent searches.
 """
+import asyncio
 import logging
 import os
-import threading
+import sys
 import time
-from typing import Optional
+from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 
 try:
-    from playwright.sync_api import sync_playwright, Browser, BrowserContext
+    from playwright.async_api import async_playwright, Browser, BrowserContext
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-# Chrome paths to try
-_CHROME_PATHS = [
-    os.environ.get("CHROME_PATH", ""),
-    r"C:/Program Files/Google/Chrome/Application/chrome.exe",
-    r"C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-]
+_CHROME_PATHS = []
+
+# 1) User-provided override via env var (highest priority)
+_chrome_env = os.environ.get("CHROME_PATH", "").strip()
+if _chrome_env:
+    _CHROME_PATHS.append(_chrome_env)
+
+# 2) Platform-specific system paths
+if sys.platform == "win32":
+    _CHROME_PATHS.extend([
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ])
+elif sys.platform == "darwin":
+    _CHROME_PATHS.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+elif sys.platform.startswith("linux"):
+    _CHROME_PATHS.extend([
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/snap/bin/chromium",
+    ])
+
 _CHROME_PATH = None
 for _p in _CHROME_PATHS:
     if _p and os.path.exists(_p):
         _CHROME_PATH = _p
         break
 
-_IDLE_TIMEOUT = 180  # close after 3 min idle
+# If no system Chrome found, Playwright will use its own bundled Chromium.
+# This is normal — _start_internal() skips executable_path when _CHROME_PATH is None.
+
+_IDLE_TIMEOUT = 180
 _BROWSER_ARGS = [
     "--headless=new",
     "--disable-blink-features=AutomationControlled",
@@ -45,175 +66,162 @@ _USER_AGENT = (
 )
 
 
-class BrowserPool:
-    """Thread-safe singleton browser pool for all data sources."""
+class AsyncBrowserPool:
+    """Async singleton browser pool with platform-isolated contexts.\n\n    Use via the module-level `get_browser_pool()` factory.\n    """
 
-    _instance: Optional["BrowserPool"] = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._init()
-        return cls._instance
-
-    def _init(self):
+    def __init__(self):
         self._playwright = None
         self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self._access_lock = threading.Lock()
+        self._contexts: Dict[str, BrowserContext] = {}
+        self._lock = asyncio.Lock()
         self._last_used = 0.0
         self._refcount = 0
-        self._warmup_done = False
+        self._warmup_done = set()
 
     # ── Public API ──────────────────────────────────────────
 
-    def acquire(self) -> Optional[BrowserContext]:
-        """Get a shared browser context. Returns None if unavailable."""
+    async def get_context(self, platform: str = "default") -> Optional[BrowserContext]:
+        return await self.acquire(platform)
+
+    async def acquire(self, platform: str = "default") -> Optional[BrowserContext]:
         if not HAS_PLAYWRIGHT:
             return None
-        with self._access_lock:
-            self._refcount += 1
+        async with self._lock:
             now = time.time()
-            if self._browser and (now - self._last_used) > _IDLE_TIMEOUT:
+            if (self._browser
+                    and (now - self._last_used) > _IDLE_TIMEOUT
+                    and self._refcount == 0):
                 logger.info("BrowserPool: idle timeout, recycling")
-                self._close_internal()
+                await self._close_internal()
             if not self._browser:
-                ok = self._start_internal()
-                if not ok:
-                    self._refcount -= 1
+                if not await self._start_internal():
                     return None
+            if platform not in self._contexts:
+                self._contexts[platform] = await self._browser.new_context(
+                    viewport={"width": 375, "height": 812},
+                    user_agent=_USER_AGENT,
+                    locale="zh-CN",
+                )
+                logger.info(f"BrowserPool: isolated context for '{platform}'")
+                await self._apply_session(self._contexts[platform], platform)
             self._last_used = now
-            return self._context
+            return self._contexts[platform]
 
-    def release(self):
-        """Release context reference."""
-        with self._access_lock:
+    async def release(self):
+        async with self._lock:
             self._refcount = max(0, self._refcount - 1)
             self._last_used = time.time()
 
-    def new_page(self):
-        """Create a new page in the shared context."""
-        ctx = self.acquire()
-        if ctx is None:
+    async def new_page(self, platform: str = "default"):
+        try:
+            ctx = await self.acquire(platform)
+            if ctx is None:
+                return None
+            self._refcount += 1
+            return await ctx.new_page()
+        except Exception as e:
+            await self.release()
+            logger.warning(f"BrowserPool: new_page '{platform}' failed: {e}")
             return None
-        return ctx.new_page()
 
-    def close_page(self, page):
-        """Close a page and release ref."""
+    async def close_page(self, page):
         try:
             if page:
-                page.close()
+                await page.close()
         except Exception:
             pass
-        self.release()
+        await self.release()
 
-    def warmup(self, url: str = "https://m.ctrip.com/html5/flight/swift/",
-               timeout_ms: int = 10000, platforms: list = None):
-        """Pre-warm the browser by loading a page and applying session cookies.
-
-        platforms: list of platform names whose saved cookies should be loaded
-                   (e.g. ["ctrip", "qunar"]). Defaults to all available sessions.
-        """
+    async def warmup(self, url: str = "https://m.ctrip.com/html5/flight/swift/",
+                     timeout_ms: int = 10000, platforms: list = None):
         if not HAS_PLAYWRIGHT:
             return False
-        with self._access_lock:
-            if self._warmup_done:
-                return True
-            ok = self._start_internal()
-            if ok:
-                # Apply saved sessions
-                self._apply_sessions(platforms)
-                page = self._context.new_page()
+        from .session_manager import get_session_manager
+        if platforms is None:
+            platforms = get_session_manager().list_platforms()
+        async with self._lock:
+            if not await self._start_internal():
+                return False
+        for plat in platforms:
+            if plat in self._warmup_done:
+                continue
+            ctx = await self.acquire(plat)
+            if ctx:
+                page = await ctx.new_page()
                 try:
-                    page.goto(url, wait_until="domcontentloaded",
-                             timeout=timeout_ms)
-                    time.sleep(2)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    await asyncio.sleep(2)
+                    self._warmup_done.add(plat)
                 except Exception:
                     pass
                 finally:
-                    page.close()
-                self._warmup_done = True
-            return ok
+                    await self.close_page(page)
+        return True
 
-    def _apply_sessions(self, platforms: list = None):
-        """Load saved login sessions and inject cookies into the context."""
-        from .session_manager import get_session_manager
-        sm = get_session_manager()
-        if platforms is None:
-            platforms = sm.list_platforms()
-        loaded = 0
-        for plat in platforms:
-            cookies = sm.get_cookies(plat)
-            if cookies:
-                try:
-                    self._context.add_cookies(cookies)
-                    loaded += 1
-                    logger.info(f"BrowserPool: applied {len(cookies)} cookies for {plat}")
-                except Exception as e:
-                    logger.warning(f"BrowserPool: failed to apply {plat} cookies: {e}")
-        if loaded:
-            logger.info(f"BrowserPool: total {loaded} platform session(s) loaded")
-
-    def shutdown(self):
-        """Force close everything."""
-        with self._access_lock:
-            self._close_internal()
+    async def shutdown(self):
+        async with self._lock:
+            await self._close_internal()
 
     # ── Internal ────────────────────────────────────────────
 
-    def _start_internal(self) -> bool:
+    async def _start_internal(self) -> bool:
         if self._browser:
             return True
         try:
-            self._playwright = sync_playwright().start()
+            self._playwright = await async_playwright().start()
             launch_kw = {"headless": True, "args": _BROWSER_ARGS}
             if _CHROME_PATH:
                 launch_kw["executable_path"] = _CHROME_PATH
-            self._browser = self._playwright.chromium.launch(**launch_kw)
-            self._context = self._browser.new_context(
-                viewport={"width": 375, "height": 812},
-                user_agent=_USER_AGENT,
-                locale="zh-CN",
-            )
-            logger.info("BrowserPool: started shared browser")
+            self._browser = await self._playwright.chromium.launch(**launch_kw)
+            logger.info("BrowserPool: Chromium started")
             return True
         except Exception as e:
             logger.error(f"BrowserPool: start failed: {e}")
-            self._close_internal()
+            await self._close_internal()
             return False
 
-    def _close_internal(self):
-        self._warmup_done = False
-        try:
-            if self._context:
-                self._context.close()
-        except Exception:
-            pass
+    async def _close_internal(self):
+        self._warmup_done.clear()
+        for ctx in list(self._contexts.values()):
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        self._contexts.clear()
         try:
             if self._browser:
-                self._browser.close()
+                await self._browser.close()
         except Exception:
             pass
         try:
             if self._playwright:
-                self._playwright.stop()
+                await self._playwright.stop()
         except Exception:
             pass
-        self._context = None
         self._browser = None
         self._playwright = None
 
+    async def _apply_session(self, ctx, platform: str):
+        try:
+            from .session_manager import get_session_manager
+            sm = get_session_manager()
+            cookies = sm.get_cookies(platform)
+            if cookies:
+                await ctx.add_cookies(cookies)
+                logger.info(f"BrowserPool: applied {len(cookies)} cookies to '{platform}'")
+        except Exception as e:
+            logger.debug(f"BrowserPool: no session for '{platform}': {e}")
 
-# ── Module-level singleton ──────────────────────────────────
 
-_browser_pool: Optional[BrowserPool] = None
+# ── Module-level async singleton factory ──────────────────
+
+_pool: Optional[AsyncBrowserPool] = None
+_pool_lock = asyncio.Lock()
 
 
-def get_browser_pool() -> BrowserPool:
-    global _browser_pool
-    if _browser_pool is None:
-        _browser_pool = BrowserPool()
-    return _browser_pool
+async def get_browser_pool() -> AsyncBrowserPool:
+    global _pool
+    async with _pool_lock:
+        if _pool is None:
+            _pool = AsyncBrowserPool()
+        return _pool

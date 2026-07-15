@@ -4,6 +4,7 @@ Flight Monitor - Data Models
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+import math
 
 
 @dataclass
@@ -40,6 +41,22 @@ class FlightPrice:
     source: str = ""             # which data source / platform
     recorded_at: str = ""        # ISO timestamp
     purchase_url: str = ""       # direct booking link
+    # ── Revenue management features (v3) ──
+    sub_class: str = ""          # 子舱位代码 Y/B/M/E/H/K/L...
+    seat_inventory: int = 9      # 剩余座位数 (OTA 超过9张显示9)
+    is_mock: bool = False        # True = 模拟数据, False = 真实抓取
+
+    def __post_init__(self):
+        # Sanitize price: reject NaN (would poison min()/sort()/alerts).
+        # Negative prices are clamped to 0 rather than rejected, because some
+        # scrapers occasionally emit -1 sentinels; the monitor's None-filter
+        # already drops non-positive values before alert checks.
+        if self.price is None:
+            return
+        if isinstance(self.price, float) and math.isnan(self.price):
+            self.price = 0.0
+        elif self.price < 0:
+            self.price = 0.0
 
 
 @dataclass

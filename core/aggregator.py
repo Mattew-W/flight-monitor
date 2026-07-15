@@ -97,195 +97,140 @@ class FlightAggregator:
             return code_map.get(raw_airport, raw_airport)
         return raw_airport
     @staticmethod
-    def process_search_results(query: SearchQuery, raw_prices: List[FlightPrice]) -> Dict[str, Any]:
-        """O(N) Optimized processing of raw flight prices."""
-        if not raw_prices:
-            return {"count": 0, "total_records": 0, "min_price": 0,
-                    "platforms": [], "flights": []}
-
-        # 1. Determine route type and target platforms
-        intl = False
+    def _get_platform_keys(departure: str, destination: str) -> list:
+        """Determine route type and return target platform keys."""
         try:
-            intl = is_international_route(query.departure, query.destination)
+            intl = is_international_route(departure, destination)
         except Exception:
-            pass
-        plat_keys = INTL_PLATFORMS if intl else DOM_PLATFORMS
+            intl = False
+        return INTL_PLATFORMS if intl else DOM_PLATFORMS
 
-        # 2. Separate data sources
-        real_flights = []
-        mock_flights = []
-        for p in raw_prices:
-            if p.source == "ctrip_browser":
-                real_flights.append(p)
+    @staticmethod
+    def _backfill_flight_data(flight: FlightPrice) -> None:
+        """Backfill missing flight data from schedule lookup."""
+        if not flight.departure_time:
+            sched = lookup_flight_schedule(flight.flight_no)
+            if sched:
+                flight.departure_time = sched["dep"]
+                flight.arrival_time = sched["arr"]
+                flight.duration = f"{sched['duration_min'] // 60}h{sched['duration_min'] % 60}m"
+                flight.aircraft = flight.aircraft or sched.get("aircraft", "")
             else:
-                mock_flights.append(p)
+                flight.aircraft = flight.aircraft or get_aircraft_for_flight(flight.flight_no)
+        if not flight.duration and flight.departure_time and flight.arrival_time:
+            flight.duration = FlightAggregator._calc_duration(flight.departure_time, flight.arrival_time)
 
-        all_prices = []
-
-        # 3. Core: O(N) processing
-        if real_flights:
-            # Build lookup key (airline, flight_no) for matching — NOT time-dependent
-            real_by_flightno = defaultdict(list)
-            seen_platforms = defaultdict(set)
-
-            for p in real_flights:
-                # Backfill missing data from schedule
-                if not p.departure_time:
-                    sched = lookup_flight_schedule(p.flight_no)
-                    if sched:
-                        p.departure_time = sched["dep"]
-                        p.arrival_time = sched["arr"]
-                        p.duration = f"{sched['duration_min'] // 60}h{sched['duration_min'] % 60}m"
-                        p.aircraft = p.aircraft or sched.get("aircraft", "")
-                    else:
-                        p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
-                # Backfill duration from dep/arr times if still empty
-                if not p.duration and p.departure_time and p.arrival_time:
-                    p.duration = FlightAggregator._calc_duration(p.departure_time, p.arrival_time)
-
-                fn_key = (p.airline, p.flight_no)
-                real_by_flightno[fn_key].append(p)
-                seen_platforms[fn_key].add(p.source)
-                all_prices.append(p)
-
-            # Keep only mock flights matching real flight numbers
-            for p in mock_flights:
-                fn_key = (p.airline, p.flight_no)
-                if fn_key in real_by_flightno:
-                    all_prices.append(p)
-                    seen_platforms[fn_key].add(p.source)
-
-            # Generate estimated cross-platform prices for missing platforms
-            # Uses ctrip_browser real price as anchor with platform-specific offsets
-            # Clearly marked as "estimated" to distinguish from real data
-            extra_prices = []
-            for p in real_flights:
-                fn_key = (p.airline, p.flight_no)
-                missing = set(plat_keys) - seen_platforms[fn_key]
-                # Platform-specific price offsets relative to ctrip (based on market observation)
-                _platform_offset = {
-                    "qunar": 0.94, "fliggy": 0.96, "tongcheng": 0.97,
-                    "tripcom": 0.95, "skyscanner": 0.93, "googleflights": 0.98,
-                    "kayak": 0.96, "expedia": 1.02,
-                    "spring": 0.88, "juneyao": 0.90, "airchina": 1.0,
-                    "csair": 0.97, "ceair": 0.98, "hainan": 1.01,
-                }
-                for pk in missing:
-                    factor = _platform_offset.get(pk, 0.97)
-                    plat_price = max(50, round(p.price * factor / 10) * 10)
-                    pi = PURCHASE_PLATFORMS.get(pk, {})
-                    url = ""
-                    tmpl = pi.get("url", "")
-                    if tmpl:
-                        try:
-                            url = tmpl.format(dep=query.departure, arr=query.destination,
-                                             date=query.departure_date, dep_code="", arr_code="")
-                        except (KeyError, Exception):
-                            url = tmpl
-                    extra_prices.append(FlightPrice(
-                        query_id=p.query_id, airline=p.airline, flight_no=p.flight_no,
-                        aircraft=p.aircraft, departure_time=p.departure_time,
-                        arrival_time=p.arrival_time, departure_airport=p.departure_airport,
-                        arrival_airport=p.arrival_airport, duration=p.duration, stops=p.stops,
-                        price=plat_price, cabin_class=p.cabin_class,
-                        source=pk,
-                        recorded_at=p.recorded_at, purchase_url=url,
-                    ))
-            all_prices.extend(extra_prices)
-        else:
-            # Pure mock mode — also enrich with aircraft details
-            for p in mock_flights:
-                if not p.departure_time:
-                    sched = lookup_flight_schedule(p.flight_no)
-                    if sched:
-                        p.departure_time = sched["dep"]
-                        p.arrival_time = sched["arr"]
-                        p.aircraft = p.aircraft or sched.get("aircraft", "")
-                p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
-            all_prices = mock_flights
-
-        # Track which platforms have real (non-estimated) prices per flight
-        _real_sources_per_flight: Dict[tuple, set] = defaultdict(set)
+    @staticmethod
+    def _generate_estimated_prices(real_flights: list, mock_flights: list,
+                                    seen_platforms: dict, plat_keys: list,
+                                    query: SearchQuery) -> list:
+        """Generate estimated cross-platform prices for missing platforms."""
+        _platform_offset = {
+            "qunar": 0.94, "fliggy": 0.96, "tongcheng": 0.97,
+            "tripcom": 0.95, "skyscanner": 0.93, "googleflights": 0.98,
+            "kayak": 0.96, "expedia": 1.02,
+            "spring": 0.88, "juneyao": 0.90, "airchina": 1.0,
+            "csair": 0.97, "ceair": 0.98, "hainan": 1.01,
+        }
+        extra_prices = []
         for p in real_flights:
-            _real_sources_per_flight[(p.airline, p.flight_no, p.departure_time)].add(p.source)
+            fn_key = (p.airline, p.flight_no)
+            missing = set(plat_keys) - seen_platforms[fn_key]
+            for pk in missing:
+                factor = _platform_offset.get(pk, 0.97)
+                plat_price = max(50, round(p.price * factor / 10) * 10)
+                pi = PURCHASE_PLATFORMS.get(pk, {})
+                url = ""
+                tmpl = pi.get("url", "")
+                if tmpl:
+                    try:
+                        url = tmpl.format(dep=query.departure, arr=query.destination,
+                                         date=query.departure_date, dep_code="", arr_code="")
+                    except Exception:
+                        url = tmpl
+                extra_prices.append(FlightPrice(
+                    query_id=p.query_id, airline=p.airline, flight_no=p.flight_no,
+                    aircraft=p.aircraft, departure_time=p.departure_time,
+                    arrival_time=p.arrival_time, departure_airport=p.departure_airport,
+                    arrival_airport=p.arrival_airport, duration=p.duration, stops=p.stops,
+                    price=plat_price, cabin_class=p.cabin_class,
+                    source=pk, recorded_at=p.recorded_at, purchase_url=url,
+                    is_mock=True, sub_class=p.sub_class, seat_inventory=p.seat_inventory,
+                ))
+        return extra_prices
+
+    @staticmethod
+    def _group_and_aggregate(all_prices: list, real_flights: list, mock_flights: list) -> tuple:
+        """O(N) hash grouping with depth aggregation. Returns (grouped_flights, min_price, all_platforms)."""
+        _real_sources: Dict[tuple, set] = defaultdict(set)
+        for p in real_flights:
+            _real_sources[(p.airline, p.flight_no, p.departure_time)].add(p.source)
         for p in mock_flights:
             fn_key = (p.airline, p.flight_no, p.departure_time)
-            if fn_key in _real_sources_per_flight:
-                _real_sources_per_flight[fn_key].add(p.source)
+            if fn_key in _real_sources:
+                _real_sources[fn_key].add(p.source)
 
-        # 4. Hash grouping with depth aggregation (O(N) single pass)
-        grouped_flights = {}
-        min_overall_price = float('inf')
-        all_platforms = set()
+        grouped = {}
+        min_price = float('inf')
+        platforms = set()
 
         for p in all_prices:
             key = (p.airline, p.flight_no, p.departure_time)
-            min_overall_price = min(min_overall_price, p.price)
-            all_platforms.add(p.source)
+            min_price = min(min_price, p.price)
+            platforms.add(p.source)
 
-            if key not in grouped_flights:
-                ac_name = p.aircraft or "未知机型"
-                dep_ap = FlightAggregator._sanitize_airport(p.departure_airport, "")
-                arr_ap = FlightAggregator._sanitize_airport(p.arrival_airport, "")
-                grouped_flights[key] = {
-                    "airline": p.airline,
-                    "flight_no": p.flight_no,
-                    "aircraft": ac_name,
-                    "aircraft_details": FlightAggregator._get_aircraft_details(ac_name),
+            if key not in grouped:
+                grouped[key] = {
+                    "airline": p.airline, "flight_no": p.flight_no,
+                    "aircraft": p.aircraft or "未知机型",
+                    "aircraft_details": FlightAggregator._get_aircraft_details(p.aircraft or "未知机型"),
                     "departure_time": p.departure_time or "时间待定",
                     "arrival_time": p.arrival_time or "待定",
-                    "departure_airport": dep_ap or p.departure_airport,
-                    "arrival_airport": arr_ap or p.arrival_airport,
-                    "duration": p.duration or "—",
-                    "stops": p.stops,
-                    "price": p.price,
-                    "purchase_url": p.purchase_url,
-                    "source": p.source,
-                    "platform_prices": {},
+                    "departure_airport": FlightAggregator._sanitize_airport(p.departure_airport, "") or p.departure_airport,
+                    "arrival_airport": FlightAggregator._sanitize_airport(p.arrival_airport, "") or p.arrival_airport,
+                    "duration": p.duration or "—", "stops": p.stops,
+                    "price": p.price, "purchase_url": p.purchase_url,
+                    "source": p.source, "platform_prices": {},
                 }
 
-            # Keep lowest price for flight card
-            if p.price < grouped_flights[key]["price"]:
-                grouped_flights[key]["price"] = p.price
-                grouped_flights[key]["purchase_url"] = p.purchase_url
-                grouped_flights[key]["source"] = p.source
+            if p.price < grouped[key]["price"]:
+                grouped[key]["price"] = p.price
+                grouped[key]["purchase_url"] = p.purchase_url
+                grouped[key]["source"] = p.source
 
-            # Is this platform price real or estimated?
-            real_set = _real_sources_per_flight.get(key, set())
+            real_set = _real_sources.get(key, set())
             is_estimated = p.source not in real_set
-
-            # Platform dedup: keep lowest per platform
-            p_dict = grouped_flights[key]["platform_prices"]
-            if p.source not in p_dict or p.price < p_dict[p.source]["price"]:
+            pp = grouped[key]["platform_prices"]
+            if p.source not in pp or p.price < pp[p.source]["price"]:
                 pi = PURCHASE_PLATFORMS.get(p.source, {})
                 name = pi.get("name", p.source)
-                p_dict[p.source] = {
-                    "source": p.source,
-                    "price": p.price,
+                pp[p.source] = {
+                    "source": p.source, "price": p.price,
                     "purchase_url": p.purchase_url,
                     "platform_name": f"{name} [预估]" if is_estimated else name,
                     "platform_icon": pi.get("icon", ""),
                     "platform_color": pi.get("color", "#666"),
                     "estimated": is_estimated,
                 }
+        return grouped, min_price, platforms
 
-        # 5. Build final sorted output with dedup by flight_no
+    @staticmethod
+    def _dedup_and_sort(grouped: dict) -> list:
+        """Deduplicate by flight_no and sort by price."""
         deduped = {}
-        for flight in grouped_flights.values():
+        for flight in grouped.values():
             mk = (flight["airline"], flight["flight_no"])
             if mk not in deduped:
                 deduped[mk] = flight
             else:
                 e = deduped[mk]
-                # Keep the one with time data
-                if flight.get("departure_time") and flight["departure_time"] not in ("时间待定",""):
-                    if not e.get("departure_time") or e["departure_time"] in ("时间待定",""):
+                if flight.get("departure_time") and flight["departure_time"] not in ("时间待定", ""):
+                    if not e.get("departure_time") or e["departure_time"] in ("时间待定", ""):
                         for attr in ("departure_time", "arrival_time", "aircraft",
                                      "duration", "departure_airport", "arrival_airport",
                                      "aircraft_details"):
                             if flight.get(attr):
                                 e[attr] = flight[attr]
-                # Merge platform prices
                 sp = {x["source"] for x in e["platform_prices"].values()}
                 for pf in flight["platform_prices"].values():
                     if pf["source"] not in sp:
@@ -293,19 +238,63 @@ class FlightAggregator:
                 if flight["price"] < e["price"]:
                     e["price"] = flight["price"]
 
-        final_list = []
+        final = []
         for flight in deduped.values():
             plat_list = sorted(flight["platform_prices"].values(), key=lambda x: x["price"])
             flight["platform_prices"] = plat_list[:8]
-            final_list.append(flight)
+            final.append(flight)
+        final.sort(key=lambda x: x["price"])
+        return final
 
-        final_list.sort(key=lambda x: x["price"])
+    @staticmethod
+    def process_search_results(query: SearchQuery, raw_prices: List[FlightPrice]) -> Dict[str, Any]:
+        """O(N) Optimized processing of raw flight prices."""
+        if not raw_prices:
+            return {"count": 0, "total_records": 0, "min_price": 0,
+                    "platforms": [], "flights": []}
+
+        plat_keys = FlightAggregator._get_platform_keys(query.departure, query.destination)
+
+        # Separate data sources
+        real_flights = [p for p in raw_prices if p.source == "ctrip_browser"]
+        mock_flights = [p for p in raw_prices if p.source != "ctrip_browser"]
+
+        if real_flights:
+            real_by_flightno = defaultdict(list)
+            seen_platforms = defaultdict(set)
+            for p in real_flights:
+                FlightAggregator._backfill_flight_data(p)
+                fn_key = (p.airline, p.flight_no)
+                real_by_flightno[fn_key].append(p)
+                seen_platforms[fn_key].add(p.source)
+
+            # Keep only mock flights matching real flight numbers
+            matched_mock = []
+            for p in mock_flights:
+                fn_key = (p.airline, p.flight_no)
+                if fn_key in real_by_flightno:
+                    matched_mock.append(p)
+                    seen_platforms[fn_key].add(p.source)
+
+            all_prices = real_flights + matched_mock
+            extra = FlightAggregator._generate_estimated_prices(
+                real_flights, matched_mock, seen_platforms, plat_keys, query)
+            all_prices.extend(extra)
+        else:
+            for p in mock_flights:
+                FlightAggregator._backfill_flight_data(p)
+                p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
+            all_prices = mock_flights
+
+        grouped, min_price, platforms = FlightAggregator._group_and_aggregate(
+            all_prices, real_flights, mock_flights)
+        final_list = FlightAggregator._dedup_and_sort(grouped)
 
         return {
             "count": len(final_list),
             "total_records": len(all_prices),
-            "min_price": min_overall_price if min_overall_price != float('inf') else 0,
-            "platforms": list(all_platforms),
+            "min_price": min_price if min_price != float('inf') else 0,
+            "platforms": list(platforms),
             "flights": final_list[:30],
         }
 
