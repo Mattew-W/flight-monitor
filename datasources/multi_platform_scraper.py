@@ -82,7 +82,7 @@ class MultiPlatformScraper:
             return []
 
         pool = get_browser_pool()
-        ctx = pool.acquire()
+        ctx = pool.get_context(self.platform)  # per-platform isolation
         if ctx is None:
             return []
         page = None
@@ -145,6 +145,9 @@ class MultiPlatformScraper:
                         source=self.platform,
                         recorded_at=datetime.now().isoformat(),
                         purchase_url=page.url,
+                        is_mock=False,
+                        sub_class="Y",
+                        seat_inventory=0,
                     ))
                     if len(results) >= 30:
                         break

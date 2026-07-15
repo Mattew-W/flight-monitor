@@ -264,8 +264,10 @@ class TripComSource(BaseDataSource):
                 cabin_class=query.cabin_class,
                 source=self.name,
                 recorded_at=now,
+                # Use IATA codes (dep_code/arr_code) for the purchase URL —
+                # Trip.com expects BJS-SHA, not 北京-上海 (the latter 404s).
                 purchase_url=(
-                    f"https://www.trip.com/flights/{query.departure}-{query.destination}/"
+                    f"https://www.trip.com/flights/{dep_code}-{arr_code}/"
                     f"?ddate={query.departure_date}"
                 ),
             ))

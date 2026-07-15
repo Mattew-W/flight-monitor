@@ -33,6 +33,8 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
+from core.browser_pool import get_browser_pool
+
 
 # ══════════════════════════════════════════════════════════════
 #  Per-airline configuration
@@ -253,32 +255,30 @@ class AirlineSnifferSource(BaseDataSource):
                         pass
         
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=["--headless=new", "--no-sandbox", "--disable-gpu",
-                          "--disable-dev-shm-usage"]
-                )
-                ctx = browser.new_context(
-                    viewport={"width": 375, "height": 812},
-                    user_agent=(
-                        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                        "AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
-                    ),
-                    locale="zh-CN",
-                )
+            pool = get_browser_pool()
+            ctx = pool.get_context(self._key)
+            if ctx is None:
+                logger.warning(f"[{self._key}] Failed to acquire browser context")
+                return []
+            page = None
+            try:
                 page = ctx.new_page()
-                
+                page.set_viewport_size({"width": 375, "height": 812})
                 page.on("response", capture_json)
-                
                 logger.debug(f"[{self._key}] Loading: {url[:80]}")
                 page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                page.wait_for_timeout(10000)  # wait for JS to load data
-                
+                page.wait_for_timeout(10000)
                 page.remove_listener("response", capture_json)
-                browser.close()
+            except Exception as e:
+                logger.warning(f"[{self._key}] Browser error: {e}")
+                return []
+            finally:
+                if page:
+                    try: page.close()
+                    except Exception: pass
+                pool.release()
         except Exception as e:
-            logger.warning(f"[{self._key}] Browser error: {e}")
+            logger.warning(f"[{self._key}] Browser pool error: {e}")
             return []
         
         # Analyze all captured JSON responses
