@@ -3,6 +3,7 @@ Flight Monitor - Price Prediction Engine v2
 Route-aware prediction with 6 distinct pricing patterns based on real-world airline behavior.
 Each route type generates uniquely shaped historical curves and forecasts.
 """
+import hashlib
 import logging
 import math
 import random
@@ -10,6 +11,17 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_seed(*parts) -> int:
+    """Produce a stable integer seed from arbitrary string parts.
+
+    Uses md5 (NOT Python's built-in hash()) so the same input always yields the
+    same seed across processes — Python's hash() is randomized via PYTHONHASHSEED
+    for str, which would make synthetic history fluctuate between restarts.
+    """
+    raw = "|".join(str(p) for p in parts)
+    return int(hashlib.md5(raw.encode("utf-8")).hexdigest()[:8], 16)
 
 
 # =====================================================================
@@ -40,23 +52,55 @@ BUDGET_ROUTES = {
     ("宁波", "大连"), ("大连", "宁波"),
 }
 
-# Known holiday periods in 2026 (Chinese holidays)
-HOLIDAYS_2026 = [
-    # Spring Festival
-    (datetime(2026, 2, 15), datetime(2026, 2, 23), "春节"),
-    # Qingming
-    (datetime(2026, 4, 4), datetime(2026, 4, 6), "清明"),
-    # Labor Day
-    (datetime(2026, 5, 1), datetime(2026, 5, 5), "五一"),
-    # Dragon Boat
-    (datetime(2026, 5, 31), datetime(2026, 6, 2), "端午"),
-    # Summer vacation
-    (datetime(2026, 7, 1), datetime(2026, 8, 31), "暑假"),
-    # Mid-Autumn + National Day
-    (datetime(2026, 9, 15), datetime(2026, 10, 8), "中秋+国庆"),
-    # New Year
-    (datetime(2026, 12, 31), datetime(2027, 1, 2), "元旦"),
+# Chinese holiday rules (lunar-based, approximate Gregorian)
+# Each entry: (month, anchor_day, name, duration_days, lead_days)
+_HOLIDAY_RULES = [
+    # Spring Festival: ~Jan 21 - Feb 20, 7 days
+    (1, 28, "春节", 7, 10),
+    # Qingming: ~Apr 4-5, 3 days
+    (4, 5, "清明", 3, 2),
+    # Labor Day: May 1-5, 5 days
+    (5, 1, "五一", 5, 3),
+    # Dragon Boat: ~late May / early June, 3 days
+    (5, 31, "端午", 3, 2),
+    # Summer vacation: Jul 1 - Aug 31
+    (7, 1, "暑假", 62, 20),
+    # Mid-Autumn: ~Sep 15-17, + National Day Oct 1-7
+    (9, 15, "中秋+国庆", 24, 14),
+    # New Year: Dec 31 - Jan 2
+    (12, 31, "元旦", 3, 2),
 ]
+
+
+class HolidayManager:
+    """Dynamic holiday engine — no hardcoded year.
+
+    Uses approximate Gregorian offsets for lunar festivals.
+    Cache lasts 1 day before auto-refresh.
+    For production, replace _HOLIDAY_RULES with an API or database-backed table.
+    """
+    _cache: Dict[int, List[Tuple[datetime, datetime, str]]] = {}
+    _last_refresh: Optional[datetime] = None
+
+    @classmethod
+    def get_holidays(cls, year: int) -> List[Tuple[datetime, datetime, str]]:
+        now = datetime.now()
+        if cls._cache and cls._last_refresh and (now - cls._last_refresh).days < 1:
+            if year in cls._cache:
+                return cls._cache[year]
+        holidays = []
+        for month, anchor_day, name, duration, _ in _HOLIDAY_RULES:
+            start = datetime(year, month, anchor_day)
+            end = start + timedelta(days=duration)
+            if month == 12:
+                end = datetime(year + 1, 1, 2)
+            holidays.append((start, end, name))
+        cls._cache[year] = holidays
+        cls._last_refresh = now
+        return holidays
+
+
+HOLIDAYS_2026 = HolidayManager.get_holidays(2026)  # Backward compat
 
 
 def _classify_route(departure: str, destination: str, dep_date: datetime) -> Dict:
@@ -70,13 +114,14 @@ def _classify_route(departure: str, destination: str, dep_date: datetime) -> Dic
     """
     route_key = (departure, destination)
 
-    # 1. Holiday check first (overrides everything)
-    for start, end, name in HOLIDAYS_2026:
-        if start <= dep_date <= end:
+    # 1. Holiday check first (overrides everything) — dynamic year
+    for start, end, name in HolidayManager.get_holidays(dep_date.year):
+        # ±1 day buffer around holidays
+        if (start - timedelta(days=1)) <= dep_date <= (end + timedelta(days=1)):
             return {
                 "profile": "holiday",
                 "description": f"{name}高峰",
-                "airline_count": 1,  # irrelevant for holiday pricing
+                "airline_count": 1,
                 "volatility": 0.9,
                 "holiday_name": name,
             }
@@ -318,7 +363,7 @@ def generate_synthetic_historical_data(
     """Generate route-profile-aware synthetic historical price data."""
     if current_price <= 0:
         return []
-    rng = random.Random(int(current_price * 1000 + hash(profile)) % 2**31)
+    rng = random.Random(int(current_price * 1000 + _stable_seed(profile)) % 2**31)
     gen = _SYNTHETIC_GENERATORS.get(profile, _synthetic_moderate)
     return gen(current_price, days_back, rng)
 
@@ -461,7 +506,7 @@ def _minimal_forecast(prices: List[float], days_ahead: int,
         "budget": 0.08, "holiday": 0.10, "offpeak": 0.03,
     }.get(profile, 0.04)
 
-    rng = random.Random(int(current * 1000 + hash(profile)) % 2**31)
+    rng = random.Random(int(current * 1000 + _stable_seed(profile)) % 2**31)
     forecast, lower, upper = [], [], []
     price = current
     for d in range(1, days_ahead + 1):
@@ -577,41 +622,60 @@ def rule_based_forecast(prices: List[float], days_ahead: int) -> Dict:
 # =====================================================================
 
 def get_historical_prices(db, query_id: int, days_back: int = 30,
-                          real_only: bool = False) -> List[Dict]:
-    """Get historical price records from database.
+                          real_only: bool = True,
+                          include_mock: bool = False) -> List[Dict]:
+    """Get rich historical price records for ML modeling or chart display.
 
-    By default uses ALL sources (real + mock) to give prediction enough
-    data points. If real_only=True, filter to only real (ctrip_browser) data.
+    Uses direct SQL subquery to locate the *exact* lowest-price record
+    per day — preserving flight-level metadata (departure_time, sub_class,
+    seat_inventory, stops) that aggregated GROUP BY would destroy.
 
-    Returns one aggregated record per date with min/avg/max.
+    Args:
+        real_only: additionally restrict to source='ctrip_browser'.
+        include_mock: include mock data (is_mock=1). Used for chart display
+            to give a richer history; ML training must keep this False.
+
+    Returns one rich dict per date with: date, price, min_price, avg_price,
+    departure_time, sub_class, seat_inventory, stops.
     """
     try:
-        if real_only:
-            history = db.get_price_history(query_id, limit=days_back * 10,
-                                            source_filter="ctrip_browser")
-        else:
-            # Use all sources so prediction has enough data points
-            history = db.get_price_history(query_id, limit=days_back * 10)
+        conn = db._get_conn()
+        source_cond = "AND source = 'ctrip_browser'" if real_only else ""
+        mock_cond = "" if include_mock else "AND is_mock = 0"
+        sql = f"""
+            SELECT pr.*, DATE(pr.recorded_at) as date
+            FROM price_records pr
+            INNER JOIN (
+                SELECT DATE(recorded_at) as date, MIN(price) as min_price
+                FROM price_records
+                WHERE query_id = ? {mock_cond} {source_cond}
+                GROUP BY DATE(recorded_at)
+            ) grouped
+            ON DATE(pr.recorded_at) = grouped.date
+               AND pr.price = grouped.min_price
+            WHERE pr.query_id = ? {mock_cond} {source_cond}
+            ORDER BY date ASC
+        """
+        rows = conn.execute(sql, (query_id, query_id)).fetchall()
 
-        if not history:
+        if not rows:
             return []
-        records = []
-        for entry in history:
-            d = entry.get("date", "")
-            if not d:
-                continue
-            records.append({
-                "date": d[:10],
-                "min_price": entry.get("min_price", 0),
-                "avg_price": entry.get("avg_price", 0),
-                "max_price": entry.get("max_price", 0),
-            })
-        # Keep lowest min_price per date (most conservative)
+
+        # Deduplicate: keep one richest record per date
         by_date = {}
-        for r in records:
+        for r in rows:
             d = r["date"]
-            if d not in by_date or r["min_price"] < by_date[d]["min_price"]:
-                by_date[d] = r
+            if d not in by_date:
+                by_date[d] = {
+                    "date": d,
+                    "price": float(r["price"]),
+                    "min_price": float(r["price"]),
+                    "avg_price": float(r["price"]),
+                    "departure_time": (r["departure_time"] or ""),
+                    "sub_class": (r["sub_class"] if "sub_class" in r.keys() else ""),
+                    "seat_inventory": int(r["seat_inventory"]) if "seat_inventory" in r.keys() else 9,
+                    "stops": int(r["stops"]) if "stops" in r.keys() else 0,
+                }
         return sorted(by_date.values(), key=lambda x: x["date"])
     except Exception as e:
         logger.error(f"Error getting historical prices: {e}")
@@ -657,9 +721,11 @@ def generate_prediction_chart(
     profile = route_info["profile"]
 
     # Get historical data — all sources for prediction depth
-    historical = get_historical_prices(db, query_id, days_back=30, real_only=False)
+    historical = get_historical_prices(db, query_id, days_back=30,
+                                       real_only=False, include_mock=True)
     # Real-only count for confidence display
-    real_hist = get_historical_prices(db, query_id, days_back=30, real_only=True)
+    real_hist = get_historical_prices(db, query_id, days_back=30,
+                                     real_only=False, include_mock=False)
     valid_hist = [h for h in historical if h.get("avg_price", 0) > 0 or h.get("min_price", 0) > 0]
 
     if not valid_hist:
@@ -673,7 +739,9 @@ def generate_prediction_chart(
     current_price = valid_hist[-1].get("avg_price", 0) or valid_hist[-1].get("min_price", 0)
 
     # Supplement with synthetic data if too few distinct dates
+    # CRITICAL: synthetic data is for chart DISPLAY only — NEVER used for ML training
     real_data_points = len(valid_hist)
+    is_synthetic = False
     if real_data_points < 3:
         synthetic = generate_synthetic_historical_data(current_price, profile, 30)
         if synthetic:
@@ -681,22 +749,28 @@ def generate_prediction_chart(
             synthetic = [s for s in synthetic if s["date"] not in real_dates]
             historical = synthetic + valid_hist
             historical.sort(key=lambda x: x["date"])
+            is_synthetic = True
         else:
-            # Force-generate with known-good parameters
-            rng = random.Random(int(current_price * 1000 + hash(profile)) % 2**31)
+            rng = random.Random(int(current_price * 1000 + _stable_seed(profile)) % 2**31)
             gen = _SYNTHETIC_GENERATORS.get(profile, _synthetic_moderate)
             synthetic = gen(current_price, 30, rng)
             real_dates = {h["date"] for h in valid_hist}
             synthetic = [s for s in synthetic if s["date"] not in real_dates]
             historical = synthetic + valid_hist
             historical.sort(key=lambda x: x["date"])
+            is_synthetic = True
     else:
         historical = valid_hist
 
-    # Extract price series
+    # Extract price series (chart display — may include synthetic)
     hist_dates = [h["date"] for h in historical]
     hist_prices = [h.get("avg_price", 0) or h.get("min_price", 0) for h in historical]
     valid_prices = [p for p in hist_prices if p > 0]
+
+    # ML training — pass rich dicts directly (departure_time/sub_class/inventory
+    # are already embedded in each record via get_historical_prices).
+    ml_records = get_historical_prices(db, query_id, days_back=30,
+                                       real_only=False, include_mock=False)
 
     if not valid_prices:
         return {
@@ -706,11 +780,12 @@ def generate_prediction_chart(
         }
 
     # Generate forecast — try Ensemble ML first, fall back to stats
-    if real_data_points >= 7:
+    # ML trains ONLY on real data (is_mock=0), never synthetic
+    if len(ml_records) >= 7:
         try:
             from .ml_predictor import predict_with_ensemble
             ml_result = predict_with_ensemble(
-                valid_prices, departure, destination,
+                ml_records, departure, destination,
                 days_until_departure, profile, cabin_class, departure_date,
                 n_estimators=50,
             )
@@ -751,14 +826,70 @@ def generate_prediction_chart(
     predicted_min_date = future_dates[predicted_min_idx] if predicted_min_idx < len(future_dates) else ""
     historical_min = min(valid_prices)
 
-    # Best buy window: when forecast is lowest
+    # ── Best-buy decision engine ──
+    drop_pct  = (current_price - predicted_min) / current_price * 100  # expected drop %
+    rise_pct  = (predicted_max - current_price) / current_price * 100  # expected rise %
+    near_low  = current_price <= historical_min * 1.03               # within 3% of all-time low
+    enough_time = days_until_departure >= 14
+    very_soon   = days_until_departure <= 3
+
     best_buy_desc = ""
-    if profile == "competitive" and predicted_min < current_price * 0.95:
-        best_buy_desc = f"最佳入手: {predicted_min_date} (预计¥{predicted_min:.0f})"
-    elif profile == "budget" and predicted_min < current_price * 0.85:
-        best_buy_desc = f"促销窗口: {predicted_min_date} 前后 (预计¥{predicted_min:.0f})"
-    elif profile in ("offpeak", "moderate") and predicted_min < current_price:
-        best_buy_desc = f"可观望至 {predicted_min_date}"
+
+    if very_soon:
+        # ── Urgency: departure imminent ──
+        best_buy_desc = f"距起飞仅{days_until_departure}天，建议立即购买"
+
+    elif profile == "holiday":
+        # ── Holiday: always buy ASAP ──
+        if enough_time:
+            best_buy_desc = f"节假日前{rise_pct:.0f}%涨幅预期，建议尽快锁定价格"
+        else:
+            best_buy_desc = f"节假日出行，价格持续高位，请尽快购买"
+
+    elif profile == "monopoly" and rise_pct > 2:
+        # ── Monopoly + rising ──
+        best_buy_desc = f"航线竞争少，价格预计上涨{rise_pct:.0f}%，建议尽早入手"
+
+    elif drop_pct >= 10 and enough_time:
+        # ── Big drop ahead, plenty of time → wait ──
+        if profile == "competitive":
+            best_buy_desc = f"预计降至¥{predicted_min:.0f}（降{drop_pct:.0f}%），最佳入手: {predicted_min_date}"
+        elif profile == "budget":
+            best_buy_desc = f"促销窗口: {predicted_min_date} 前后，预计降至¥{predicted_min:.0f}"
+        else:
+            best_buy_desc = f"预计还有{drop_pct:.0f}%降价空间，可观望至{predicted_min_date}"
+
+    elif drop_pct >= 5 and days_until_departure >= 7:
+        # ── Moderate drop, some time → watch ──
+        best_buy_desc = f"预计小幅下降至¥{predicted_min:.0f}，可观望至{predicted_min_date}"
+
+    elif near_low:
+        # ── Already near bottom → buy ──
+        best_buy_desc = f"当前¥{current_price:.0f}接近历史最低¥{historical_min:.0f}，建议入手"
+
+    elif rise_pct >= 5:
+        # ── Strong upward trend → buy now ──
+        if enough_time:
+            best_buy_desc = f"价格预计上涨{rise_pct:.0f}%，建议{days_until_departure // 2}天内锁定"
+        else:
+            best_buy_desc = f"价格正在上涨（+{rise_pct:.0f}%），请尽快购买"
+
+    elif rise_pct >= 3:
+        # ── Mild upward trend → buy soon ──
+        best_buy_desc = f"价格预计上涨{rise_pct:.0f}%，建议尽早入手"
+
+    elif predicted_min < current_price and enough_time:
+        # ── Slight drop, enough time → lazy watch ──
+        best_buy_desc = f"价格稳定，可观望至{predicted_min_date}"
+
+    else:
+        # ── Stable → no strong signal ──
+        if profile == "monopoly":
+            best_buy_desc = f"竞争少航线，价格稳定，可随时购买"
+        elif near_low:
+            best_buy_desc = f"价格已接近底部，现在入手是不错的选择"
+        else:
+            best_buy_desc = ""  # no signal
 
     # Build Chart.js data
     n_hist = len(hist_prices)

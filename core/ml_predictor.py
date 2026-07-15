@@ -39,7 +39,6 @@ _HAS_NUMPY = False
 try:
     from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
     from sklearn.linear_model import Ridge
-    from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
     import numpy as np
     _HAS_SKLEARN = True
     _HAS_NUMPY = True
@@ -83,37 +82,115 @@ _ROUTE_COMPETITION: Dict[str, int] = {
     "holiday": 5, "offpeak": 3,
 }
 
-# 2026 Chinese holidays
-_HOLIDAYS = [
-    (datetime(2026, 2, 15), datetime(2026, 2, 23)),  # Spring
-    (datetime(2026, 4, 4), datetime(2026, 4, 6)),    # Qingming
-    (datetime(2026, 5, 1), datetime(2026, 5, 5)),    # Labor
-    (datetime(2026, 5, 31), datetime(2026, 6, 2)),   # Dragon Boat
-    (datetime(2026, 7, 1), datetime(2026, 8, 31)),   # Summer
-    (datetime(2026, 9, 15), datetime(2026, 10, 8)),  # Mid-Autumn + National
-    (datetime(2026, 12, 31), datetime(2027, 1, 2)),  # New Year
+# Chinese holiday rules (approximate Gregorian offsets for lunar festivals)
+# Format: (month, anchor_day, name, duration_days, lead_days)
+_HOLIDAY_RULES = [
+    (1, 28, "春节", 7, 10),
+    (4, 5, "清明", 3, 2),
+    (5, 1, "五一", 5, 3),
+    (5, 31, "端午", 3, 2),
+    (7, 1, "暑假", 62, 20),
+    (9, 15, "中秋+国庆", 24, 14),
+    (12, 31, "元旦", 3, 2),
 ]
 
+
+class _HolidayCache:
+    """Dynamic holiday resolver — no hardcoded year."""
+    _cache: Dict[int, List[Tuple[datetime, datetime]]] = {}
+    _last_refresh: Optional[datetime] = None
+
+    @classmethod
+    def get(cls, year: int) -> List[Tuple[datetime, datetime]]:
+        now = datetime.now()
+        if cls._cache and cls._last_refresh and (now - cls._last_refresh).days < 1:
+            if year in cls._cache:
+                return cls._cache[year]
+        holidays = []
+        for month, anchor_day, _name, duration, _ in _HOLIDAY_RULES:
+            start = datetime(year, month, anchor_day)
+            end = start + timedelta(days=duration)
+            if month == 12:
+                end = datetime(year + 1, 1, 2)
+            holidays.append((start, end))
+        cls._cache[year] = holidays
+        cls._last_refresh = now
+        return holidays
+
+
+# Backward compat: compute 2026 at import time
+_HOLIDAYS = _HolidayCache.get(2026)
+
 _CABIN_MULTIPLIER = {"economy": 1.0, "business": 2.5, "first": 4.0}
+
+# Sub-class discount mapping (Y=full fare, deeper=cheaper)
+_SUBCLASS_WEIGHT = {
+    "Y": 1.00, "B": 0.92, "M": 0.85, "H": 0.78, "K": 0.72,
+    "L": 0.65, "V": 0.58, "T": 0.50, "E": 0.45, "N": 0.40,
+    "Q": 0.35, "S": 0.30, "G": 0.28, "O": 0.25, "X": 0.22,
+    "U": 0.20, "R": 0.18, "W": 0.15, "Z": 0.12, "P": 0.38,
+    "A": 1.00, "C": 0.90, "D": 0.80, "J": 0.75, "F": 1.05,
+}
+
 _PEAK_MONTHS = {1, 2, 7, 8}  # CNY + summer
 _SHOULDER_MONTHS = {4, 5, 9, 10}  # spring/autumn
 
 FEATURE_NAMES = [
-    "current_price",      # 0
-    "distance_kkm",       # 1
-    "competition_level",  # 2
-    "volatility",         # 3
-    "trend_7d",           # 4
-    "trend_30d",          # 5
-    "days_left_ratio",    # 6
-    "log_days_left",      # 7
-    "cabin_multiplier",   # 8
-    "holiday_proximity",  # 9
-    "month_ratio",        # 10
-    "day_of_week",        # 11
-    "is_peak_season",     # 12
-    "data_density",       # 13
+    "current_price",        # 0
+    "distance_kkm",         # 1
+    "competition_level",    # 2
+    "volatility",           # 3
+    "trend_7d",             # 4
+    "trend_30d",            # 5
+    "days_left_ratio",      # 6
+    "log_days_left",        # 7
+    "cabin_multiplier",     # 8
+    "holiday_proximity",    # 9
+    "month_ratio",          # 10
+    "day_of_week",          # 11
+    "is_peak_season",       # 12
+    "data_density",         # 13
+    "is_synthetic",         # 14
+    "dep_time_sin",         # 15 — cyclical time encoding
+    "dep_time_cos",         # 16
+    "inventory_pressure",   # 17 — 1.0 when <= 3 seats left
+    "sub_class_weight",     # 18 — fare class discount ratio
+    "stop_count",           # 19 — number of stops
 ]
+
+
+def _encode_cyclical_time(time_str: str) -> tuple:
+    """Encode time as sin/cos components for ML — preserves 23:00↔01:00 continuity."""
+    if not time_str:
+        return 0.0, 0.0
+    try:
+        t = time_str.strip().replace(":", "").replace("：", "")
+        if len(t) >= 4:
+            h, m = int(t[:2]), int(t[2:4])
+        elif ":" in time_str:
+            h, m = map(int, time_str.split(":")[:2])
+        else:
+            return 0.0, 0.0
+        minutes = h * 60 + m
+        time_sin = math.sin(2 * math.pi * minutes / 1440.0)
+        time_cos = math.cos(2 * math.pi * minutes / 1440.0)
+        return round(time_sin, 4), round(time_cos, 4)
+    except (ValueError, IndexError):
+        return 0.0, 0.0
+
+
+def _encode_subclass(sc: str) -> float:
+    """Map fare class code to a discount weight (0~1). Unknown classes default to 0.6."""
+    if not sc:
+        return 0.7  # unknown, assume moderate discount
+    sc = sc.strip().upper()
+    if sc in _SUBCLASS_WEIGHT:
+        return _SUBCLASS_WEIGHT[sc]
+    # Try single-char match
+    for prefix in sc[:1]:
+        if prefix in _SUBCLASS_WEIGHT:
+            return _SUBCLASS_WEIGHT[prefix]
+    return 0.7
 
 
 def _estimate_distance(dep: str, dst: str) -> float:
@@ -126,9 +203,13 @@ def _estimate_distance(dep: str, dst: str) -> float:
 
 
 def _days_to_holiday(date: datetime) -> float:
-    """Days to nearest holiday. Negative = inside holiday."""
+    """Days to nearest holiday. Negative = inside holiday.
+
+    Uses _HolidayCache to auto-adapt to any year (no hardcoded 2026).
+    """
+    holidays = _HolidayCache.get(date.year)
     best = 365.0
-    for start, end in _HOLIDAYS:
+    for start, end in holidays:
         if start <= date <= end:
             return -1.0
         if date < start:
@@ -137,7 +218,7 @@ def _days_to_holiday(date: datetime) -> float:
 
 
 def extract_features(
-    prices: List[float],
+    records: List[Dict],
     days_ahead: int,
     departure: str,
     destination: str,
@@ -145,9 +226,35 @@ def extract_features(
     cabin_class: str = "economy",
     departure_date: str = "",
 ) -> List[List[float]]:
-    """Extract 14-D feature vectors for each forecast day."""
+    """Extract 20-D feature vectors from rich flight records for each forecast day.
+
+    Each record dict should contain at minimum: price.
+    Revenue-management fields (departure_time, sub_class, seat_inventory, stops)
+    are read from the *latest* record in the time series.
+
+    Feature dimensions:
+      [ 0] current_price      [ 7] log_days_left       [14] is_synthetic
+      [ 1] distance_kkm        [ 8] cabin_multiplier    [15] dep_time_sin
+      [ 2] competition_level   [ 9] holiday_proximity   [16] dep_time_cos
+      [ 3] volatility          [10] month_ratio         [17] inventory_pressure
+      [ 4] trend_7d            [11] day_of_week         [18] sub_class_weight
+      [ 5] trend_30d           [12] is_peak_season      [19] stop_count
+      [ 6] days_left_ratio     [13] data_density
+    """
+    # Extract pure price series for statistical features
+    prices = [float(r.get("price", 0)) for r in records if r.get("price")]
+    if not prices:
+        prices = [500.0]
     n = len(prices)
-    current = prices[-1] if prices else 500.0
+    current = prices[-1]
+
+    # ── Extract per-flight metadata from latest record ──
+    latest = records[-1] if records else {}
+    dep_time = latest.get("departure_time", "") or ""
+    sub_class = latest.get("sub_class", "") or ""
+    seat_inventory = int(latest.get("seat_inventory", 9) or 9)
+    stops = int(latest.get("stops", 0) or 0)
+    is_mock = bool(latest.get("is_mock", False))
 
     # Statistical features
     trend_7d = trend_30d = volatility = 0.0
@@ -177,6 +284,12 @@ def extract_features(
     dow = dep_date.weekday()
     is_peak = 1.0 if month in _PEAK_MONTHS else (0.5 if month in _SHOULDER_MONTHS else 0.0)
 
+    # ── v4 revenue-management encodings ──
+    time_sin, time_cos = _encode_cyclical_time(dep_time)
+    inventory_pressure = 1.0 if seat_inventory <= 3 else 0.0
+    sub_class_weight = _encode_subclass(sub_class)
+    is_synthetic = 1.0 if is_mock else 0.0
+
     features = []
     for day in range(1, days_ahead + 1):
         days_left = max(days_ahead - day + 1, 1)
@@ -195,6 +308,13 @@ def extract_features(
             dow / 7.0,
             is_peak,
             min(n / 30.0, 1.0),
+            # ── v4 revenue-management dimensions ──
+            is_synthetic,          # 14
+            time_sin,              # 15: cyclical departure-time sine
+            time_cos,              # 16: cyclical departure-time cosine
+            inventory_pressure,    # 17: 1.0 when ≤3 seats, else 0.0
+            sub_class_weight,      # 18: fare-class discount ratio (0~1)
+            float(stops),          # 19: stop count
         ]
         features.append(f)
     return features
@@ -607,10 +727,15 @@ class EnsemblePredictor:
             vals = sorted(bp[i] for bp in bootstrap_preds)
             lower[i] = round(vals[2])  # 2.5th percentile
             upper[i] = round(vals[97]) # 97.5th percentile
-            # Clamp to reasonable range
+            # Clamp to reasonable range around the point forecast.
             if forecast[i] > 0:
                 lower[i] = max(lower[i], int(forecast[i] * 0.7))
                 upper[i] = min(upper[i], int(forecast[i] * 1.4))
+            # Guard against interval inversion: if the bootstrap CI was narrower
+            # than [0.7f, 1.4f], clamping can push lower above upper.
+            if lower[i] > upper[i]:
+                mid = (lower[i] + upper[i]) // 2
+                lower[i] = upper[i] = mid
 
         return (
             [round(f) for f in forecast],
@@ -647,31 +772,33 @@ class EnsemblePredictor:
 # ═══════════════════════════════════════════════════════════════
 
 def build_training_data(
-    historical_prices: List[float],
+    historical_records: List[Dict],
     departure: str,
     destination: str,
     profile: str = "moderate",
     cabin_class: str = "economy",
     departure_date: str = "",
 ) -> Tuple[List[List[float]], List[float]]:
-    """Build supervised training set from historical price sequence.
+    """Build supervised training set from rich historical flight records.
 
-    For each day t in [0..N-2), use features from days [0..t] to predict
-    the price at day t+1. This creates a (N-1) × 14 feature matrix.
+    For each day t in [0..N-2), use records from days [0..t] to predict
+    the price at day t+1. This creates a (N-1) × 20 feature matrix.
+
+    Each record should be a dict with 'price' + optional flight metadata.
     """
     X, y = [], []
-    for t in range(len(historical_prices) - 1):
-        past = historical_prices[:t + 1]
+    for t in range(len(historical_records) - 1):
+        past = historical_records[:t + 1]
         feats = extract_features(past, 1, departure, destination,
                                  profile, cabin_class, departure_date)
         if feats:
             X.append(feats[0])
-            y.append(historical_prices[t + 1])
+            y.append(float(historical_records[t + 1].get("price", 0)))
     return X, y
 
 
 def predict_with_ensemble(
-    prices: List[float],
+    records: List[Dict],
     departure: str,
     destination: str,
     days_ahead: int,
@@ -681,7 +808,11 @@ def predict_with_ensemble(
     n_estimators: int = 50,
     model_path: str = "",
 ) -> Dict:
-    """End-to-end ensemble prediction.
+    """End-to-end ensemble prediction from rich flight records.
+
+    Each record dict should contain at minimum: price.
+    Optional per-flight metadata: departure_time, sub_class, seat_inventory,
+    stops, is_mock — read from the latest record in the series.
 
     Returns:
       {
@@ -692,12 +823,12 @@ def predict_with_ensemble(
         "data_points": N,
       }
     """
-    n = len(prices)
+    n = len(records)
     if n < 7:
         return {"error": f"Need >= 7 data points, got {n}"}
 
     X_train, y_train = build_training_data(
-        prices, departure, destination, profile, cabin_class, departure_date
+        records, departure, destination, profile, cabin_class, departure_date,
     )
 
     ensemble = EnsemblePredictor(n_estimators=n_estimators)
@@ -708,10 +839,10 @@ def predict_with_ensemble(
     if not ensemble.trained:
         return {"error": "Ensemble failed to train any model"}
 
-    # Generate forecast features
+    # Generate forecast features from full record set
     X_forecast = extract_features(
-        prices, days_ahead, departure, destination,
-        profile, cabin_class, departure_date
+        records, days_ahead, departure, destination,
+        profile, cabin_class, departure_date,
     )
     forecast, lower, upper = ensemble.predict(X_forecast)
 
