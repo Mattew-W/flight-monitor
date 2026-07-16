@@ -1,0 +1,68 @@
+{
+  "_meta": {
+    "description": "S3: Airline definitions and mappings (moved from config.py)",
+    "version": "1.0",
+    "last_updated": "2026-07-15"
+  },
+  "domestic_airlines": [
+    "中国国航", "南方航空", "东方航空", "海南航空", "深圳航空",
+    "厦门航空", "四川航空", "山东航空", "春秋航空", "吉祥航空",
+    "华夏航空", "长龙航空", "成都航空", "首都航空", "天津航空"
+  ],
+  "international_airlines": [
+    "日本航空", "全日空", "大韩航空", "韩亚航空",
+    "新加坡航空", "阿联酋航空", "卡塔尔航空", "汉莎航空",
+    "国泰航空", "法国航空", "英国航空", "美国航空",
+    "达美航空", "美联航", "土耳其航空", "泰国航空",
+    "马来西亚航空", "越南航空"
+  ],
+  "airline_official_sites": {
+    "中国国航": "airchina",
+    "南方航空": "csair",
+    "东方航空": "ceair",
+    "海南航空": "hainan",
+    "春秋航空": "spring",
+    "吉祥航空": "juneyao",
+    "深圳航空": "airchina",
+    "厦门航空": "csair",
+    "四川航空": "airchina",
+    "山东航空": "airchina",
+    "华夏航空": "airchina",
+    "长龙航空": "airchina",
+    "成都航空": "airchina",
+    "首都航空": "hainan",
+    "天津航空": "hainan",
+    "日本航空": "jal",
+    "全日空": "ana",
+    "大韩航空": "koreanair",
+    "韩亚航空": "koreanair",
+    "新加坡航空": "singapore",
+    "阿联酋航空": "emirates",
+    "卡塔尔航空": "qatar",
+    "汉莎航空": "lufthansa",
+    "国泰航空": "cathaypacific",
+    "港龙航空": "cathaypacific",
+    "法国航空": "airfrance",
+    "英国航空": "britishairways",
+    "美国航空": "americanairlines",
+    "达美航空": "americanairlines",
+    "美联航": "americanairlines",
+    "土耳其航空": "turkishairlines",
+    "泰国航空": "thaiairways",
+    "马来西亚航空": "malaysiaairlines",
+    "越南航空": "vietnamairlines"
+  },
+  "airline_codes": {
+    "日本航空": "JL", "全日空": "NH", "大韩航空": "KE",
+    "韩亚航空": "OZ", "新加坡航空": "SQ", "阿联酋航空": "EK",
+    "卡塔尔航空": "QR", "汉莎航空": "LH", "国泰航空": "CX",
+    "法国航空": "AF", "英国航空": "BA", "美国航空": "AA",
+    "达美航空": "DL", "美联航": "UA", "土耳其航空": "TK",
+    "泰国航空": "TG", "马来西亚航空": "MH", "越南航空": "VN"
+  },
+  "aircraft_types": {
+    "narrow_body": ["A320", "A321", "A319", "B737-800", "B738", "B737MAX"],
+    "wide_body": ["A330", "A332", "A333", "A350", "A359", "A35K", "B777", "B77W", "B787", "B789", "B747", "B748", "A380"],
+    "regional": ["E190", "E195", "ARJ21", "ATR72"]
+  }
+}

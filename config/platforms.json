@@ -1,0 +1,177 @@
+{
+  "_meta": {
+    "description": "S3: Purchase platform definitions (moved from config.py PURCHASE_PLATFORMS)",
+    "version": "1.0",
+    "last_updated": "2026-07-15"
+  },
+  "platforms": {
+    "ctrip": {
+      "name": "携程旅行",
+      "color": "#0086f6",
+      "icon": "🛫",
+      "url": "https://flights.ctrip.com/online/list/oneway-{dep_code}-{arr_code}?depdate={date}&cabin=y_s&adult=1&child=0&infant=0"
+    },
+    "qunar": {
+      "name": "去哪儿",
+      "color": "#3cae3e",
+      "icon": "🐪",
+      "url": "https://flight.qunar.com/site/oneway_list.htm?searchDepartureAirport={dep}&searchArrivalAirport={arr}&searchDepartureTime={date}&fromCode={dep_code}&toCode={arr_code}"
+    },
+    "fliggy": {
+      "name": "飞猪旅行",
+      "color": "#ff6a00",
+      "icon": "🐷",
+      "url": "https://s.fliggy.com/flight/search?from={dep}&to={arr}&date={date}&adult=1&child=0"
+    },
+    "tongcheng": {
+      "name": "同程旅行",
+      "color": "#2d8cf0",
+      "icon": "🚂",
+      "url": "https://www.ly.com/flights/itinerary/oneway/{dep}-{arr}?date={date}"
+    },
+    "airchina": {
+      "name": "国航官网",
+      "color": "#e8211a",
+      "icon": "✈️",
+      "url": "https://www.airchina.com.cn/swp/index/flightSearch?tripType=0&depCity={dep}&arrCity={arr}&depDate={date}&cabin=y_s"
+    },
+    "csair": {
+      "name": "南航官网",
+      "color": "#005bac",
+      "icon": "✈️",
+      "url": "https://www.csair.com/zh-CN/touch/shopping/domestic/domestic-ticket-search?dep={dep}&arr={arr}&depDate={date}"
+    },
+    "ceair": {
+      "name": "东航官网",
+      "color": "#1a2a6c",
+      "icon": "✈️",
+      "url": "https://www.ceair.com/booking/{dep_code}-{arr_code}-{date}?cabinType=economy"
+    },
+    "hainan": {
+      "name": "海航官网",
+      "color": "#c7000b",
+      "icon": "✈️",
+      "url": "https://www.hnair.com/?dep={dep}&arr={arr}&date={date}"
+    },
+    "spring": {
+      "name": "春秋航空",
+      "color": "#51c7d0",
+      "icon": "🍃",
+      "url": "https://www.ch.com/flight?dep={dep}&arr={arr}&depDate={date}"
+    },
+    "juneyao": {
+      "name": "吉祥航空",
+      "color": "#7c3aed",
+      "icon": "🍀",
+      "url": "https://www.juneyaoair.com/?dep={dep}&arr={arr}&date={date}"
+    },
+    "tripcom": {
+      "name": "Trip.com",
+      "color": "#0086f6",
+      "icon": "🌍",
+      "url": "https://www.trip.com/flights/showfare?depCityCode={dep_code}&arrCityCode={arr_code}&depDate={date}&cabinType=economy"
+    },
+    "skyscanner": {
+      "name": "Skyscanner",
+      "color": "#0770e3",
+      "icon": "🔍",
+      "url": "https://www.skyscanner.com/transport/flights/{dep_code}/{arr_code}/{date}/?adultsv2=1&cabinclass=economy"
+    },
+    "googleflights": {
+      "name": "Google Flights",
+      "color": "#4285f4",
+      "icon": "🔎",
+      "url": "https://www.google.com/travel/flights?q=Flights+from+{dep_code}+to+{arr_code}+on+{date}&curr=CNY"
+    },
+    "kayak": {
+      "name": "Kayak",
+      "color": "#ff690f",
+      "icon": "🛬",
+      "url": "https://www.kayak.com/flights/{dep_code}-{arr_code}/{date}?adults=1&eco=1"
+    },
+    "expedia": {
+      "name": "Expedia",
+      "color": "#ffc72c",
+      "icon": "🧳",
+      "url": "https://www.expedia.com/Flight-Search?tripType=oneway&leg1=from:{dep_code}({dep}),to:{arr_code}({arr}),departure:{date}TANYT&passengers=adults:1"
+    },
+    "jal": {
+      "name": "日本航空 JAL",
+      "color": "#e60012",
+      "icon": "🇯🇵",
+      "url": "https://www.jal.co.jp/jp/en/inter/?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "ana": {
+      "name": "全日空 ANA",
+      "color": "#13448f",
+      "icon": "🇯🇵",
+      "url": "https://www.ana.co.jp/en/jp/?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "koreanair": {
+      "name": "大韩航空",
+      "color": "#00256c",
+      "icon": "🇰🇷",
+      "url": "https://www.koreanair.com/jp/en/booking/booking-search?dep={dep_code}&arr={arr_code}&depDate={date}"
+    },
+    "singapore": {
+      "name": "新加坡航空",
+      "color": "#f99f1c",
+      "icon": "🇸🇬",
+      "url": "https://www.singaporeair.com/en_UK/jp/plan-book/flights/?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "emirates": {
+      "name": "阿联酋航空",
+      "color": "#d71921",
+      "icon": "🇦🇪",
+      "url": "https://www.emirates.com/jp/english/book/flights/?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "qatar": {
+      "name": "卡塔尔航空",
+      "color": "#5c0632",
+      "icon": "🇶🇦",
+      "url": "https://www.qatarairways.com/en/book/flights?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "lufthansa": {
+      "name": "汉莎航空",
+      "color": "#05164d",
+      "icon": "🇩🇪",
+      "url": "https://www.lufthansa.com/online/portal/lh/jp/booking?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "cathaypacific": {
+      "name": "国泰航空",
+      "color": "#006e63",
+      "icon": "🇭🇰",
+      "url": "https://www.cathaypacific.com/flights/jp/book?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "thai": {
+      "name": "泰国航空",
+      "color": "#4a1e87",
+      "icon": "🇹🇭",
+      "url": "https://www.thaiairways.com/book?from={dep_code}&to={arr_code}&depart={date}"
+    },
+    "airfrance": {
+      "name": "法国航空",
+      "color": "#002157",
+      "icon": "🇫🇷",
+      "url": "https://www.airfrance.com/search?dep={dep_code}&arr={arr_code}&depDate={date}"
+    },
+    "britishairways": {
+      "name": "英国航空",
+      "color": "#075aaa",
+      "icon": "🇬🇧",
+      "url": "https://www.britishairways.com/travel/home/public/en_us?dep={dep_code}&arr={arr_code}&date={date}"
+    },
+    "americanairlines": {
+      "name": "美国航空",
+      "color": "#0078d2",
+      "icon": "🇺🇸",
+      "url": "https://www.aa.com/booking/flights/search?dep={dep_code}&arr={arr_code}&depDate={date}"
+    },
+    "thaiairways": {
+      "name": "泰国航空",
+      "color": "#5d2e8c",
+      "icon": "🇹🇭",
+      "url": "https://www.thaiairways.com/en/booking/bookings.flights?dep={dep_code}&arr={arr_code}&date={date}"
+    }
+  }
+}
