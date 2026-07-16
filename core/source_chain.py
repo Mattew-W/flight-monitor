@@ -166,6 +166,65 @@ class SourceChain:
                 query,
             )
 
+    async def search_all(self, query: SearchQuery) -> List[FlightPrice]:
+        """Search all available sources and aggregate results.
+
+        Unlike `search()` which returns on first success, this tries every
+        source and aggregates all results. Useful for one-shot searches where
+        maximum coverage is desired.
+        """
+        if not self._sources:
+            logger.warning(f"SourceChain[{self.name}]: no sources configured")
+            return []
+
+        all_prices: List[FlightPrice] = []
+
+        for entry in self._sources:
+            # Check circuit breaker
+            if entry.circuit_breaker and not entry.circuit_breaker.can_execute():
+                logger.debug(f"SourceChain[{self.name}]: '{entry.name}' circuit open, skipping")
+                self._stats[entry.name]["skipped"] += 1
+                continue
+
+            # Check availability
+            if hasattr(entry.source, 'is_available') and not entry.source.is_available():
+                logger.debug(f"SourceChain[{self.name}]: '{entry.name}' not available, skipping")
+                self._stats[entry.name]["skipped"] += 1
+                continue
+
+            try:
+                prices = await self._execute_source(entry, query)
+                if prices:
+                    self._stats[entry.name]["success"] += 1
+                    if entry.circuit_breaker:
+                        entry.circuit_breaker.record_success()
+                    all_prices.extend(prices)
+                    logger.info(
+                        f"SourceChain[{self.name}]: '{entry.name}' returned "
+                        f"{len(prices)} results (aggregated)"
+                    )
+                else:
+                    logger.debug(
+                        f"SourceChain[{self.name}]: '{entry.name}' returned empty"
+                    )
+            except Exception as e:
+                self._stats[entry.name]["failure"] += 1
+                if entry.circuit_breaker:
+                    entry.circuit_breaker.record_failure()
+                logger.warning(
+                    f"SourceChain[{self.name}]: '{entry.name}' failed: {e}"
+                )
+
+        return all_prices
+
+    def get_circuit_breaker_info(self) -> Dict[str, dict]:
+        """Return circuit breaker state for each source."""
+        info = {}
+        for entry in self._sources:
+            if entry.circuit_breaker:
+                info[entry.name] = entry.circuit_breaker.get_info()
+        return info
+
     def get_stats(self) -> Dict[str, Dict[str, int]]:
         """Return success/failure/skip statistics for each source."""
         return dict(self._stats)

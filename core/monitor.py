@@ -1,7 +1,8 @@
 """
-Flight Monitor - Price Monitoring Engine v2
+Flight Monitor - Price Monitoring Engine v3
 Concurrent query checking + async notification queue.
 S1: Uses async adapters for uniform sync/async source handling.
+S4: Uses SourceChain + CircuitBreaker for priority-based fallback.
 """
 import asyncio
 import inspect
@@ -17,6 +18,8 @@ from .database import Database
 from .models import SearchQuery, FlightPrice, PriceAlert, AlertHistory
 from .notifier import Notifier
 from .async_scraper_base import AsyncScraperBase
+from .source_chain import SourceChain
+from .circuit_breaker import CircuitBreakerConfig
 from datasources import (
     MockDataSource, CtripDataSource,
     CtripBrowserSource, SkyscannerSource,
@@ -25,6 +28,8 @@ from datasources import (
 from datasources.async_adapters import AsyncBingSearchSource
 from config import (
     MONITOR_INTERVAL_SECONDS, ENABLED_SOURCES,
+    SOURCE_PRIORITY, CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT, CIRCUIT_BREAKER_SUCCESS_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,32 +143,71 @@ class PriceMonitor:
         self.notifier = Notifier()
         self._notify_worker = _NotifyWorker(self.notifier)
 
-        # Initialize data sources — wrap each in a uniform async adapter
+        # S4: Build SourceChain with circuit breakers
+        self.source_chain = SourceChain("monitor")
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            recovery_timeout=CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
+            success_threshold=CIRCUIT_BREAKER_SUCCESS_THRESHOLD,
+        )
+        self._build_source_chain(cb_config)
+
+        # Keep sources dict for backward compatibility (stats, inspection)
         self.sources = {}
-        if "mock" in ENABLED_SOURCES:
-            self.sources["mock"] = self._wrap_source(MockDataSource())
-        if "ctrip" in ENABLED_SOURCES:
-            src = CtripDataSource()
-            if src.is_available():
-                self.sources["ctrip"] = self._wrap_source(src)
-        if "ctrip_browser" in ENABLED_SOURCES:
-            src = CtripBrowserSource()  # async: uses shared browser pool
-            if src.is_available():
-                self.sources["ctrip_browser"] = self._wrap_source(src)
-        if "skyscanner" in ENABLED_SOURCES:
-            src = SkyscannerSource()
-            if src.is_available():
-                self.sources["skyscanner"] = self._wrap_source(src)
-        if "bing" in ENABLED_SOURCES:
-            src = BingSearchSource()
-            if src.is_available():
-                # Bing uses sync Playwright — wrap in thread-pool adapter
-                self.sources["bing"] = AsyncBingSearchSource()
+        for name, entry in zip(
+            self.source_chain.get_source_names(),
+            self.source_chain._sources
+        ):
+            self.sources[name] = entry.source
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+
+    def _build_source_chain(self, cb_config: CircuitBreakerConfig):
+        """Build the source chain with priorities and circuit breakers."""
+        # Define source factory functions
+        source_factories = {
+            "mock": lambda: MockDataSource(),
+            "ctrip": lambda: CtripDataSource(),
+            "ctrip_browser": lambda: CtripBrowserSource(),
+            "skyscanner": lambda: SkyscannerSource(),
+            "bing": lambda: AsyncBingSearchSource(),
+        }
+
+        # Add sources in priority order
+        for name in sorted(SOURCE_PRIORITY, key=lambda k: SOURCE_PRIORITY[k]):
+            if name not in ENABLED_SOURCES:
+                continue
+            if name not in source_factories:
+                continue
+
+            try:
+                src = source_factories[name]()
+                # Check availability (skip circuit breaker for mock - always available)
+                if name != "mock" and hasattr(src, 'is_available') and not src.is_available():
+                    logger.info(f"Source '{name}' not available, skipping")
+                    continue
+
+                # Wrap in async adapter if needed
+                wrapped = self._wrap_source(src)
+                priority = SOURCE_PRIORITY[name]
+
+                # Mock source: no circuit breaker (always works)
+                cb = None if name == "mock" else cb_config
+                self.source_chain.add_source(wrapped, priority=priority,
+                                             circuit_breaker_config=cb)
+            except Exception as e:
+                logger.warning(f"Failed to initialize source '{name}': {e}")
+
+        if len(self.source_chain) == 0:
+            # Ensure mock is always available as ultimate fallback
+            logger.warning("No sources configured, adding mock as fallback")
+            self.source_chain.add_source(
+                self._wrap_source(MockDataSource()),
+                priority=99, circuit_breaker_config=None
+            )
 
     @staticmethod
     def _wrap_source(source) -> AsyncScraperBase:
@@ -246,52 +290,39 @@ class PriceMonitor:
         return asyncio.run(self._check_query_async(query))
 
     async def _check_query_async(self, query: SearchQuery) -> List[FlightPrice]:
-        """Async implementation: iterates all sources via their async adapters."""
-        all_prices: List[FlightPrice] = []
+        """S4: Use SourceChain for priority-based fallback with circuit breakers.
 
-        for source_name, source in self.sources.items():
-            try:
-                prices = await source.async_search_flights(query)
-                if prices:
-                    # Filter out records with invalid price (None / NaN / non-positive)
-                    # so downstream min()/sort()/alert comparisons don't crash.
-                    valid = [p for p in prices
-                             if p.price is not None
-                             and p.price == p.price  # NaN check
-                             and p.price > 0]
-                    dropped = len(prices) - len(valid)
-                    if dropped:
-                        logger.warning(
-                            f"  [{source_name}] dropped {dropped} invalid-price records"
-                        )
-                    if valid:
-                        all_prices.extend(valid)
-                        logger.info(
-                            f"  [{source_name}] {query.departure}->{query.destination} "
-                            f"on {query.departure_date}: {len(valid)} flights, "
-                            f"min ¥{min(p.price for p in valid):.0f}"
-                        )
-            except Exception as e:
-                logger.error(f"  [{source_name}] Error: {e}")
+        The chain tries sources in priority order. First source that returns
+        valid results is used. If all fail, mock (priority 99) provides fallback.
+        """
+        prices = await self.source_chain.search(query)
 
-        if not all_prices and "mock" in self.sources:
-            logger.info("  No real data, falling back to mock...")
-            try:
-                prices = await self.sources["mock"].async_search_flights(query)
-                if prices:
-                    valid = [p for p in prices
-                             if p.price is not None and p.price == p.price and p.price > 0]
-                    if valid:
-                        all_prices.extend(valid)
-                        logger.info(f"  [mock fallback] {len(valid)} flights")
-            except Exception as e:
-                logger.error(f"  [mock fallback] Error: {e}")
+        # Filter out records with invalid price (None / NaN / non-positive)
+        if prices:
+            valid = [p for p in prices
+                     if p.price is not None
+                     and p.price == p.price  # NaN check
+                     and p.price > 0]
+            dropped = len(prices) - len(valid)
+            if dropped:
+                logger.warning(f"  Dropped {dropped} invalid-price records")
+            prices = valid
 
-        if all_prices:
-            self.db.add_price_records(all_prices)
-            self._check_alerts(query, all_prices)
+        if prices:
+            logger.info(
+                f"  {query.departure}->{query.destination} "
+                f"on {query.departure_date}: {len(prices)} flights, "
+                f"min ¥{min(p.price for p in prices):.0f}"
+            )
+            self.db.add_price_records(prices)
+            self._check_alerts(query, prices)
+        else:
+            logger.info(
+                f"  {query.departure}->{query.destination} "
+                f"on {query.departure_date}: no results from any source"
+            )
 
-        return all_prices
+        return prices
 
     def _check_alerts(self, query: SearchQuery, prices: List[FlightPrice]):
         if not prices:
@@ -353,17 +384,25 @@ class PriceMonitor:
         return asyncio.run(self._search_once_async(query))
 
     async def _search_once_async(self, query: SearchQuery) -> List[FlightPrice]:
-        all_prices: List[FlightPrice] = []
-        for source_name, source in self.sources.items():
-            try:
-                prices = await source.async_search_flights(query)
-                all_prices.extend(prices)
-            except Exception as e:
-                logger.error(f"[{source_name}] Error: {e}")
+        """S4: Use SourceChain.search_all() for maximum coverage.
+
+        Unlike monitoring (which uses fallback), one-shot search aggregates
+        results from all available sources for price comparison.
+        """
+        prices = await self.source_chain.search_all(query)
         # Sort safely: filter out None/NaN prices first.
-        valid = [p for p in all_prices if p.price is not None and p.price == p.price]
+        valid = [p for p in prices if p.price is not None and p.price == p.price]
         valid.sort(key=lambda p: p.price)
         return valid
 
     def search_and_store(self, query: SearchQuery) -> List[FlightPrice]:
         return self.check_query(query)
+
+    def get_chain_status(self) -> dict:
+        """S4: Return source chain status including circuit breakers and stats."""
+        return {
+            "chain_name": self.source_chain.name,
+            "sources": self.source_chain.get_source_names(),
+            "stats": self.source_chain.get_stats(),
+            "circuit_breakers": self.source_chain.get_circuit_breaker_info(),
+        }

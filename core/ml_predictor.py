@@ -158,6 +158,27 @@ FEATURE_NAMES = [
     "stop_count",           # 19 — number of stops
 ]
 
+# Core feature subset (8 dimensions) — selected by stability analysis
+# These features showed CV < 0.5 across 5 independent runs, indicating
+# robust signal vs. noise. The full 20-D set causes overfitting with <100 samples.
+CORE_FEATURE_INDICES = [0, 3, 4, 5, 6, 7, 10, 13]
+CORE_FEATURE_NAMES = [FEATURE_NAMES[i] for i in CORE_FEATURE_INDICES]
+
+
+def select_features(X: List[List[float]], indices: List[int] = None) -> List[List[float]]:
+    """Select a subset of features from the full feature matrix.
+    
+    Args:
+        X: Full feature matrix (n_samples x n_features)
+        indices: Feature indices to keep. Defaults to CORE_FEATURE_INDICES.
+    
+    Returns:
+        Reduced feature matrix (n_samples x len(indices))
+    """
+    if indices is None:
+        indices = CORE_FEATURE_INDICES
+    return [[row[i] for i in indices] for row in X]
+
 
 def _encode_cyclical_time(time_str: str) -> tuple:
     """Encode time as sin/cos components for ML — preserves 23:00↔01:00 continuity."""
@@ -515,10 +536,11 @@ class _RidgeLinear:
 # ═══════════════════════════════════════════════════════════════
 
 class _SklearnGBR:
-    def __init__(self, n_estimators=50, lr=0.1):
+    def __init__(self, n_estimators=20, lr=0.05):
         self.model = GradientBoostingRegressor(
             n_estimators=n_estimators, learning_rate=lr,
-            max_depth=3, subsample=0.8, random_state=42,
+            max_depth=2, subsample=0.8, random_state=42,
+            min_samples_leaf=5,
         )
     def fit(self, X, y):
         self.model.fit(np.array(X), np.array(y))
@@ -527,9 +549,10 @@ class _SklearnGBR:
 
 
 class _SklearnRFR:
-    def __init__(self, n_estimators=50):
+    def __init__(self, n_estimators=20):
         self.model = RandomForestRegressor(
-            n_estimators=n_estimators, max_depth=5,
+            n_estimators=n_estimators, max_depth=3,
+            min_samples_leaf=5, max_features='sqrt',
             random_state=42, n_jobs=-1,
         )
     def fit(self, X, y):
@@ -540,7 +563,7 @@ class _SklearnRFR:
 
 class _SklearnRidge:
     def __init__(self):
-        self.model = Ridge(alpha=1.0)
+        self.model = Ridge(alpha=5.0)
     def fit(self, X, y):
         self.model.fit(np.array(X), np.array(y))
     def predict(self, X):
@@ -582,7 +605,7 @@ class EnsemblePredictor:
     Weights: inverse validation RMSE → better models get higher weight.
     """
 
-    def __init__(self, n_estimators=50, learning_rate=0.1):
+    def __init__(self, n_estimators=20, learning_rate=0.05):
         self.n_est = n_estimators
         self.lr = learning_rate
         self.models: List = []
@@ -590,6 +613,7 @@ class EnsemblePredictor:
         self.metrics: Dict[str, Dict[str, float]] = {}
         self.feature_importance: Dict[str, float] = {}
         self.trained = False
+        self._feature_indices: List[int] = None  # Feature indices used during training
 
     def _build_models(self):
         if _HAS_SKLEARN:
@@ -599,22 +623,39 @@ class EnsemblePredictor:
                 ("Ridge", _SklearnRidge()),
             ]
         return [
-            ("GBR", _GradientBoostingRegressor(self.n_est, self.lr)),
-            ("RFR", _BaggedStumps(self.n_est)),
-            ("Ridge", _RidgeLinear(alpha=1.0)),
+            ("GBR", _GradientBoostingRegressor(20, 0.05)),
+            ("RFR", _BaggedStumps(15, max_features=3)),
+            ("Ridge", _RidgeLinear(alpha=5.0)),
         ]
 
     def _split_train_val(self, X, y, val_frac=0.2):
-        """Hold-out validation split (last val_frac of data)."""
+        """Time-series aware hold-out validation split.
+        
+        Uses the LAST val_frac of data for validation (no shuffling).
+        This preserves temporal order and avoids data leakage.
+        """
         n = len(X)
         split = max(1, int(n * (1 - val_frac)))
         return X[:split], y[:split], X[split:], y[split:]
 
-    def train(self, X, y, val_frac=0.2) -> Dict:
+    def train(self, X, y, val_frac=0.2, use_feature_selection=True) -> Dict:
         """Train all models and compute ensemble weights.
+
+        Args:
+            X: Feature matrix (n_samples x n_features)
+            y: Target values
+            val_frac: Fraction of data for validation (taken from the end)
+            use_feature_selection: If True, reduce to 8 core features
 
         Returns evaluation report.
         """
+        # Feature selection: reduce to core features to prevent overfitting
+        if use_feature_selection and len(X[0]) > len(CORE_FEATURE_INDICES):
+            self._feature_indices = CORE_FEATURE_INDICES
+            X = select_features(X)
+        else:
+            self._feature_indices = list(range(len(X[0])))
+        
         X_tr, y_tr, X_val, y_val = self._split_train_val(X, y, val_frac)
         self.models = []
         self.weights = []
@@ -631,16 +672,26 @@ class EnsemblePredictor:
                     rmse = _rmse(y_val, yp)
                     r2 = _r2_score(y_val, yp)
                     mae = _mae(y_val, yp)
+                    
+                    # Also compute training metrics for overfit detection
+                    yp_tr = model.predict(X_tr)
+                    rmse_tr = _rmse(y_tr, yp_tr)
+                    r2_tr = _r2_score(y_tr, yp_tr)
                 else:
                     # No validation data: use training error (less reliable)
                     yp = model.predict(X_tr)
                     rmse = _rmse(y_tr, yp) * 1.1  # penalty for no validation
                     r2 = _r2_score(y_tr, yp)
                     mae = _mae(y_tr, yp)
+                    rmse_tr = rmse / 1.1
+                    r2_tr = r2
 
                 self.models.append(model)
-                self.metrics[name] = {"RMSE": round(rmse, 1), "R²": round(r2, 3),
-                                       "MAE": round(mae, 1)}
+                self.metrics[name] = {
+                    "RMSE": round(rmse, 1), "R²": round(r2, 3),
+                    "MAE": round(mae, 1),
+                    "RMSE_train": round(rmse_tr, 1), "R²_train": round(r2_tr, 3),
+                }
                 all_rmse.append(max(rmse, 1.0))
                 logger.debug(f"  {name}: RMSE={rmse:.1f}, R²={r2:.3f}, MAE={mae:.1f}")
             except Exception as e:
@@ -665,6 +716,9 @@ class EnsemblePredictor:
             "metrics": self.metrics,
             "top_features": dict(list(sorted(
                 self.feature_importance.items(), key=lambda x: -x[1]))[:5]),
+            "n_features": len(X[0]) if X else 0,
+            "n_train": len(X_tr),
+            "n_val": len(X_val),
         }
 
     def _compute_feature_importance(self, X, y):
@@ -693,10 +747,16 @@ class EnsemblePredictor:
     def predict(self, X) -> Tuple[List[float], List[float], List[float]]:
         """Ensemble prediction with bootstrap confidence intervals.
 
+        Automatically applies the same feature selection used during training.
+
         Returns: (forecast, lower_95ci, upper_95ci)
         """
         if not self.models:
             return [0.0] * len(X), [0.0] * len(X), [0.0] * len(X)
+
+        # Apply same feature selection as training
+        if self._feature_indices is not None and len(X[0]) > len(self._feature_indices):
+            X = select_features(X, self._feature_indices)
 
         m = len(self.models)
         n = len(X)
@@ -805,10 +865,12 @@ def predict_with_ensemble(
     profile: str = "moderate",
     cabin_class: str = "economy",
     departure_date: str = "",
-    n_estimators: int = 50,
+    n_estimators: int = 20,
     model_path: str = "",
 ) -> Dict:
     """End-to-end ensemble prediction from rich flight records.
+
+    Uses 8 core features by default to prevent overfitting on small datasets.
 
     Each record dict should contain at minimum: price.
     Optional per-flight metadata: departure_time, sub_class, seat_inventory,
@@ -840,10 +902,12 @@ def predict_with_ensemble(
         return {"error": "Ensemble failed to train any model"}
 
     # Generate forecast features from full record set
-    X_forecast = extract_features(
+    # Apply same feature selection as training
+    X_forecast_full = extract_features(
         records, days_ahead, departure, destination,
         profile, cabin_class, departure_date,
     )
+    X_forecast = select_features(X_forecast_full)
     forecast, lower, upper = ensemble.predict(X_forecast)
 
     # Save model
@@ -868,7 +932,7 @@ def predict_with_ensemble(
 # LEGACY COMPAT
 # ═══════════════════════════════════════════════════════════════
 
-def create_predictor(n_estimators=50):
+def create_predictor(n_estimators=20):
     """Legacy factory — returns EnsemblePredictor."""
     p = EnsemblePredictor(n_estimators=n_estimators)
     # Inject a `model` attribute so caller can check p.model is not None

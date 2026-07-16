@@ -95,21 +95,61 @@ class CtripBrowserSource(BaseDataSource):
             logger.warning(f"CtripBrowserSource async: {e}")
             return []
 
-    async def _do_search(self, page, query, dep_code: str, arr_code: str) -> List[FlightPrice]:
+    async def search_flights_with_page(self, page, query: SearchQuery,
+                                        page_timeout_ms: int = 20000,
+                                        wait_after_load_ms: int = 4000) -> List[FlightPrice]:
+        """Search flights using an existing page (page reuse mode for fast collection).
+        
+        This avoids the overhead of creating/closing a page for each search.
+        The caller is responsible for page lifecycle.
+        
+        Args:
+            page: Existing Playwright page to reuse
+            query: Search query parameters
+            page_timeout_ms: Page load timeout in ms (fast mode: 10000)
+            wait_after_load_ms: Wait time after page load in ms (fast mode: 2000)
+        """
+        city = CITY_TO_CTRIP_ID.get(query.departure)
+        city2 = CITY_TO_CTRIP_ID.get(query.destination)
+        if not city or not city2:
+            return []
+        dep_code, _ = city
+        arr_code, _ = city2
+        try:
+            return await self._do_search(page, query, dep_code, arr_code,
+                                         page_timeout_ms=page_timeout_ms,
+                                         wait_after_load_ms=wait_after_load_ms)
+        except Exception as e:
+            logger.warning(f"CtripBrowserSource with_page: {e}")
+            return []
+
+    async def _do_search(self, page, query, dep_code: str, arr_code: str,
+                         page_timeout_ms: int = 20000, wait_after_load_ms: int = 4000) -> List[FlightPrice]:
         flight_data_map: Dict[str, FlightPrice] = {}
         api_intercepted = False
         seen: Set[str] = set()
+        # 匹配手机端和电脑端的 API 端点
+        api_patterns = (
+            "flightListSearchForH5", "flightGloryList",  # 移动端
+            "flightListSearch", "api/flightlist",        # 电脑端
+            "getFlightList", "searchFlight",             # 其他可能
+        )
 
         async def on_response(response):
             nonlocal api_intercepted
             url = response.url
             if response.status != 200:
                 return
-            for pat in ("flightListSearchForH5", "flightGloryList"):
+            for pat in api_patterns:
                 if pat in url:
                     try:
                         data = await response.json()
+                        # 尝试多种数据格式
                         items = data.get("fltitem") or data.get("finfo") or []
+                        if not items and isinstance(data.get("data"), dict):
+                            items = data["data"].get("flightList", [])
+                        if not items:
+                            items = data.get("flightList", [])
                         if isinstance(items, list):
                             for item in items:
                                 entry = self._extract_flight(
@@ -125,15 +165,17 @@ class CtripBrowserSource(BaseDataSource):
 
         page.on("response", on_response)
         try:
+            # 手机端搜索（电脑端会被 WhaleGuard 拦截）
             search_url = (
                 f"https://m.ctrip.com/html5/flight/swift/list"
                 f"?dcity={quote(query.departure)}&acity={quote(query.destination)}"
                 f"&ddate={query.departure_date}&cabin=Y_S"
                 f"&adult=1&child=0&infant=0"
             )
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_timeout(3000)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=page_timeout_ms)
+            await page.wait_for_timeout(wait_after_load_ms)
 
+            # 滚动加载更多
             last_height = await page.evaluate("document.body.scrollHeight")
             for _ in range(SCROLL_PASSES):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -151,52 +193,66 @@ class CtripBrowserSource(BaseDataSource):
         finally:
             page.remove_listener("response", on_response)
 
-        # DOM fallback
+        # DOM fallback — 适配电脑网页版结构
         if not flight_data_map:
             try:
                 html = await page.content()
-                pattern = re.compile(
-                    r'([A-Z0-9]{2}\d{2,4})[^A-Z]{0,60}?'
-                    r'([\u4e00-\u9fff]{2,6}(?:航空|国际|航司|Jet|Air|Airlines))'
-                    r'[^\u00a5]{0,40}?\u00a5\s*(\d{3,6})',
-                    re.DOTALL | re.UNICODE,
-                )
+                # 电脑网页版价格模式: 航班号 + 航司 + ¥价格
+                patterns = [
+                    # 模式1: 航班号(CA1234) + 航司 + ¥价格
+                    re.compile(
+                        r'([A-Z]{2}\d{2,4})[\s\S]{0,200}?'
+                        r'([\u4e00-\u9fff]{2,8}(?:航空|国际|航司)?)[\s\S]{0,100}?'
+                        r'[¥￥]\s*(\d{3,6})',
+                        re.UNICODE,
+                    ),
+                    # 模式2: 航班号单独出现 + 价格
+                    re.compile(
+                        r'data-flightno="([A-Z]{2}\d{2,4})"[\s\S]{0,300}?'
+                        r'(\d{3,6})\s*元',
+                        re.UNICODE,
+                    ),
+                ]
                 dom_count = 0
-                for m in pattern.finditer(html):
+                for pattern in patterns:
                     if dom_count >= 30:
                         break
-                    fn_key = m.group(1)
-                    if fn_key in seen:
-                        continue
-                    seen.add(fn_key)
-                    try:
-                        price = float(m.group(3))
-                        if price < 100:
+                    for m in pattern.finditer(html):
+                        if dom_count >= 30:
+                            break
+                        fn_key = m.group(1)
+                        if fn_key in seen:
                             continue
-                        entry = FlightPrice(
-                            query_id=query.id or 0, airline=m.group(2),
-                            flight_no=fn_key, aircraft="",
-                            departure_time="", arrival_time="",
-                            departure_airport=query.departure,
-                            arrival_airport=query.destination,
-                            duration="", stops=0, price=price,
-                            cabin_class=query.cabin_class or "economy",
-                            source=self.name, recorded_at=datetime.now().isoformat(),
-                            purchase_url=page.url,
-                            sub_class="", seat_inventory=9, is_mock=False,
-                        )
-                        lookup = _get_schedule_lookup()
-                        sched = lookup(fn_key)
-                        if sched:
-                            entry.departure_time = sched["dep"]
-                            entry.arrival_time = sched["arr"]
-                            dm = sched["duration_min"]
-                            entry.duration = f"{dm // 60}h{dm % 60}m"
-                            entry.aircraft = sched.get("aircraft", "")
-                        flight_data_map[fn_key] = entry
-                        dom_count += 1
-                    except ValueError:
-                        continue
+                        seen.add(fn_key)
+                        try:
+                            price = float(m.group(3) if m.lastindex >= 3 else m.group(2))
+                            if price < 100:
+                                continue
+                            airline = m.group(2) if m.lastindex >= 3 else "未知航司"
+                            entry = FlightPrice(
+                                query_id=query.id or 0, airline=airline,
+                                flight_no=fn_key, aircraft="",
+                                departure_time="", arrival_time="",
+                                departure_airport=query.departure,
+                                arrival_airport=query.destination,
+                                duration="", stops=0, price=price,
+                                cabin_class=query.cabin_class or "economy",
+                                source=self.name, recorded_at=datetime.now().isoformat(),
+                                purchase_url=page.url,
+                                sub_class="", seat_inventory=9, is_mock=False,
+                            )
+                            lookup = _get_schedule_lookup()
+                            sched = lookup(fn_key)
+                            if sched:
+                                entry.departure_time = sched["dep"]
+                                entry.arrival_time = sched["arr"]
+                                dm = sched["duration_min"]
+                                entry.duration = f"{dm // 60}h{dm % 60}m"
+                                entry.aircraft = sched.get("aircraft", "")
+                            flight_data_map[fn_key] = entry
+                            dom_count += 1
+                        except (ValueError, IndexError):
+                            continue
             except Exception as e:
                 logger.debug(f"DOM fallback error: {e}")
 

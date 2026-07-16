@@ -45,7 +45,21 @@ FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 # skyscanner = Skyscanner browse API (may be blocked in China)
 # amadeus = Amadeus API (free 2k/mo, needs key, may be blocked)
 # multi: qunar, fliggy, tongcheng, airchina (all need browser)
-ENABLED_SOURCES = ["mock", "bing"]
+ENABLED_SOURCES = ["mock", "bing", "ctrip_browser", "ctrip", "skyscanner"]
+
+# ── Source Priority (lower = tried first) ────────────────────
+SOURCE_PRIORITY = {
+    "ctrip_browser": 1,
+    "ctrip": 2,
+    "skyscanner": 3,
+    "bing": 4,
+    "mock": 99,
+}
+
+# ── Circuit Breaker Config ───────────────────────────────────
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3        # consecutive failures before opening
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 600       # seconds before testing recovery (10 min)
+CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 1        # successes in half_open to close
 
 # Ctrip API
 CTRIP_API_URL = "https://flights.ctrip.com/itinerary/api/12808/lowestPrice"

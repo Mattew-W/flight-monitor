@@ -587,9 +587,9 @@ function renderQuickResult(data) {
         { label: "置信下限", data: cd.lower_bound, borderColor: "rgba(239,68,68,.25)", fill: false, tension: 0.3, pointRadius: 0, borderWidth: 1 },
     ];
 
-    // Add best-buy star marker if predicted min is below current price
+    // Add best-buy star marker if predicted min is <= current price (current is already good)
     if (data.predicted_min_date && data.predicted_min > 0
-        && data.predicted_min < (data.current_price || Infinity)) {
+        && data.predicted_min <= (data.current_price || Infinity)) {
         const minIdx = cd.labels.indexOf(data.predicted_min_date);
         if (minIdx >= 0) {
             const markerData = new Array(cd.labels.length).fill(null);
@@ -1286,9 +1286,9 @@ function renderPredictionChart(data) {
     
     const ctx = document.getElementById("predictionChart").getContext("2d");
     
-    // Add best-buy star marker if predicted min is below current price
+    // Add best-buy star marker if predicted min is <= current price (current is already good)
     if (data.predicted_min_date && data.predicted_min > 0
-        && data.predicted_min < (data.current_price || Infinity)) {
+        && data.predicted_min <= (data.current_price || Infinity)) {
         const minIdx = labels.indexOf(data.predicted_min_date);
         if (minIdx >= 0) {
             const markerData = new Array(labels.length).fill(null);

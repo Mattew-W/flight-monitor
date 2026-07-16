@@ -1,0 +1,202 @@
+{
+  "n_records": 10683,
+  "n_price_records": 10683,
+  "price_distribution": {
+    "mean": 9087.064120565385,
+    "median": 8372.0,
+    "stdev": 4611.3591668171175,
+    "min": 1759.0,
+    "max": 79512.0,
+    "q25": 5277.0,
+    "q75": 12373.0,
+    "iqr": 7096.0
+  },
+  "airline_classification": {
+    "per_airline": {
+      "SpiceJet": {
+        "tier": "ultra_lcc",
+        "median_price": 3873.0,
+        "n_records": 818
+      },
+      "Trujet": {
+        "tier": "ultra_lcc",
+        "median_price": 4140.0,
+        "n_records": 1
+      },
+      "IndiGo": {
+        "tier": "ultra_lcc",
+        "median_price": 5000.0,
+        "n_records": 2053
+      },
+      "GoAir": {
+        "tier": "ultra_lcc",
+        "median_price": 5135.0,
+        "n_records": 194
+      },
+      "Air Asia": {
+        "tier": "lcc",
+        "median_price": 5162.0,
+        "n_records": 319
+      },
+      "Vistara": {
+        "tier": "lcc",
+        "median_price": 7980.0,
+        "n_records": 479
+      },
+      "Vistara Premium economy": {
+        "tier": "lcc",
+        "median_price": 9125.0,
+        "n_records": 3
+      },
+      "Air India": {
+        "tier": "lcc",
+        "median_price": 9443.0,
+        "n_records": 1752
+      },
+      "Multiple carriers": {
+        "tier": "fsc",
+        "median_price": 10197.0,
+        "n_records": 1196
+      },
+      "Multiple carriers Premium economy": {
+        "tier": "fsc",
+        "median_price": 11269.0,
+        "n_records": 13
+      },
+      "Jet Airways": {
+        "tier": "fsc",
+        "median_price": 11467.0,
+        "n_records": 3849
+      },
+      "Jet Airways Business": {
+        "tier": "premium",
+        "median_price": 54747.0,
+        "n_records": 6
+      }
+    },
+    "tier_stats": {
+      "ultra_lcc": {
+        "median": 4804.0,
+        "mean": 5328.75831702544,
+        "stdev": 2272.5418774221007,
+        "count": 3066,
+        "volatility": 0.42646743241503465
+      },
+      "lcc": {
+        "median": 8372.0,
+        "mean": 8767.517430473952,
+        "stdev": 3805.0442131128866,
+        "count": 2553,
+        "volatility": 0.4339933445569659
+      },
+      "fsc": {
+        "median": 11087.0,
+        "mean": 11468.07216291024,
+        "stdev": 4144.938658011142,
+        "count": 5058,
+        "volatility": 0.3614329068678694
+      },
+      "premium": {
+        "median": 54747.0,
+        "mean": 58358.666666666664,
+        "stdev": 11667.596747688303,
+        "count": 6,
+        "volatility": 0.19992911788631743
+      }
+    },
+    "median_all": 8372.0
+  },
+  "stop_discount": {
+    "median_by_stops": {
+      "0": 4667.0,
+      "1": 10262.0,
+      "2": 12760.0,
+      "3": 12954.0,
+      "4": 17686.0
+    },
+    "discount_rate_per_stop": {
+      "2": -1.734,
+      "1": -1.199,
+      "3": -1.776,
+      "4": -2.79
+    },
+    "average_stop_discount": -1.8747500000000001
+  },
+  "service_premium": {
+    "premium_multiplier": {
+      "no_meal": 1.28,
+      "business": 7.462,
+      "no_baggage": 0.479
+    },
+    "sample_sizes": {
+      "no_info": 8348,
+      "has_meal": 0,
+      "no_meal": 1982,
+      "business": 4,
+      "no_baggage": 320
+    }
+  },
+  "route_competition": {
+    "thresholds": {
+      "low": 6,
+      "medium": 8,
+      "high": 9,
+      "max": 10,
+      "mean": 7.5
+    },
+    "per_route": {
+      "Banglore_New Delhi": 9,
+      "Kolkata_Banglore": 7,
+      "Delhi_Cochin": 10,
+      "Chennai_Kolkata": 5,
+      "Banglore_Delhi": 8,
+      "Mumbai_Hyderabad": 6
+    }
+  },
+  "distance_tier_model": {
+    "duration_thresholds": {
+      "short_haul_hours": 3,
+      "medium_haul_hours": 6
+    },
+    "route_counts": {
+      "short_haul": 3,
+      "medium_haul": 0,
+      "long_haul": 3
+    },
+    "notes": "Duration thresholds are universal; price/route-km varies by market"
+  },
+  "departure_time_pattern": {
+    "hourly_price_ratio": {
+      "0": 0.541,
+      "1": 0.507,
+      "2": 0.794,
+      "3": 1.268,
+      "4": 0.767,
+      "5": 1.196,
+      "6": 0.899,
+      "7": 0.947,
+      "8": 1.201,
+      "9": 1.276,
+      "10": 1.004,
+      "11": 0.974,
+      "12": 1.17,
+      "13": 1.105,
+      "14": 1.201,
+      "15": 0.785,
+      "16": 1.274,
+      "17": 0.996,
+      "18": 1.201,
+      "19": 0.907,
+      "20": 1.201,
+      "21": 0.959,
+      "22": 0.656,
+      "23": 1.087
+    },
+    "slot_ratios": {
+      "redeye": 0.846,
+      "morning": 1.05,
+      "afternoon": 1.089,
+      "evening": 1.002
+    }
+  }
+}

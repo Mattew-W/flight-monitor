@@ -12,14 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import DB_PATH, HOST, PORT, DEBUG
 from core.database import Database
 from core.monitor import PriceMonitor
+from core.logging_config import setup_logging
 from api.routes import create_app
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+# Configure structured logging (S5: JSON format + request_id support)
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+setup_logging(level="INFO", log_file=os.path.join(LOG_DIR, "flight_monitor.log"))
 logger = logging.getLogger("flight_monitor")
 
 

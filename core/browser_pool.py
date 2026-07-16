@@ -51,14 +51,16 @@ for _p in _CHROME_PATHS:
 # This is normal — _start_internal() skips executable_path when _CHROME_PATH is None.
 
 _IDLE_TIMEOUT = 180
+_HEADED_MODE = os.environ.get("HEADED_MODE", "0") == "1"
 _BROWSER_ARGS = [
-    "--headless=new",
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--window-size=375,812",
 ]
+if not _HEADED_MODE:
+    _BROWSER_ARGS.insert(0, "--headless=new")
 _USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) "
@@ -169,11 +171,12 @@ class AsyncBrowserPool:
             return True
         try:
             self._playwright = await async_playwright().start()
-            launch_kw = {"headless": True, "args": _BROWSER_ARGS}
+            launch_kw = {"headless": not _HEADED_MODE, "args": _BROWSER_ARGS}
             if _CHROME_PATH:
                 launch_kw["executable_path"] = _CHROME_PATH
             self._browser = await self._playwright.chromium.launch(**launch_kw)
-            logger.info("BrowserPool: Chromium started")
+            mode_str = "HEADED" if _HEADED_MODE else "headless"
+            logger.info(f"BrowserPool: Chromium started ({mode_str})")
             return True
         except Exception as e:
             logger.error(f"BrowserPool: start failed: {e}")

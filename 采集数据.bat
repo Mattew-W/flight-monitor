@@ -14,9 +14,9 @@ echo   Flight Monitor - Collect Data
 echo ============================================
 echo.
 
-%PY% seed_data.py --mock-only -w 16
+%PY% tools\seed_data.py --mock-only -w 16
 echo.
-%PY% backfill_history.py
+%PY% tools\backfill_history.py
 echo.
 echo ============================================
 echo   Done!

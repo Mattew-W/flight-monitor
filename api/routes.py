@@ -16,6 +16,7 @@ from core.database import Database
 from core.models import SearchQuery, PriceAlert
 from core.monitor import PriceMonitor
 from core.price_prediction import generate_prediction_chart
+from core.logging_config import setup_request_logging
 from config import (
     DB_PATH, CITY_CODES,
     PURCHASE_PLATFORMS, POPULAR_ROUTES, CITY_GROUPS,
@@ -101,6 +102,9 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
 
     app.config["db"] = db
     app.config["monitor"] = monitor
+
+    # ── S5: Structured request logging (request_id injection) ──
+    setup_request_logging(app)
 
     # ── CORS + error handlers ───────────────────────────────────
     @app.after_request
@@ -584,7 +588,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
     def flight_lookup(flight_no):
         """Look up flight schedule by flight number."""
         try:
-            from flight_schedules import lookup_flight_schedule
+            from datasources.flight_schedules import lookup_flight_schedule
         except ImportError:
             return jsonify({"found": False, "error": "schedule db not available"}), 501
         sched = lookup_flight_schedule(flight_no)
@@ -598,7 +602,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
     def flight_search():
         """Search flights by city pair (like Bing's flight info card)."""
         try:
-            from flight_schedules import search_flights_by_route
+            from datasources.flight_schedules import search_flights_by_route
         except ImportError:
             return jsonify({"error": "schedule db not available"}), 501
         dep = request.args.get("dep", "")
