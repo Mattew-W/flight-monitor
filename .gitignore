@@ -42,3 +42,4 @@ data/bing_route_cache.json
 
 # .codebuddy (local AI assistant)
 .codebuddy/
+pytest_output.txt
