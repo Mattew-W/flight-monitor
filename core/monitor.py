@@ -1,6 +1,7 @@
 """
 Flight Monitor - Price Monitoring Engine v2
 Concurrent query checking + async notification queue.
+S1: Uses async adapters for uniform sync/async source handling.
 """
 import asyncio
 import inspect
@@ -15,11 +16,13 @@ from typing import List, Optional
 from .database import Database
 from .models import SearchQuery, FlightPrice, PriceAlert, AlertHistory
 from .notifier import Notifier
+from .async_scraper_base import AsyncScraperBase
 from datasources import (
     MockDataSource, CtripDataSource,
     CtripBrowserSource, SkyscannerSource,
     BingSearchSource,
 )
+from datasources.async_adapters import AsyncBingSearchSource
 from config import (
     MONITOR_INTERVAL_SECONDS, ENABLED_SOURCES,
 )
@@ -92,6 +95,36 @@ class _NotifyWorker:
                 logger.error(f"Notify worker error: {e}")
 
 
+# ── Source Adapters (uniform async interface) ───────────────────
+
+class _SyncToAsyncAdapter(AsyncScraperBase):
+    """Wraps a sync-only source into AsyncScraperBase interface."""
+
+    def __init__(self, source):
+        self._source = source
+        self.name = getattr(source, 'name', source.__class__.__name__)
+
+    def is_available(self) -> bool:
+        return self._source.is_available()
+
+    def _sync_search_flights(self, query: SearchQuery) -> List[FlightPrice]:
+        return self._source.search_flights(query)
+
+
+class _AsyncMethodAdapter(AsyncScraperBase):
+    """Wraps a source that has async search_flights() into AsyncScraperBase."""
+
+    def __init__(self, source):
+        self._source = source
+        self.name = getattr(source, 'name', source.__class__.__name__)
+
+    def is_available(self) -> bool:
+        return self._source.is_available()
+
+    async def async_search_flights(self, query: SearchQuery) -> List[FlightPrice]:
+        return await self._source.search_flights(query)
+
+
 # ── Price Monitor (concurrent) ──────────────────────────────────
 
 class PriceMonitor:
@@ -105,31 +138,49 @@ class PriceMonitor:
         self.notifier = Notifier()
         self._notify_worker = _NotifyWorker(self.notifier)
 
-        # Initialize data sources
+        # Initialize data sources — wrap each in a uniform async adapter
         self.sources = {}
         if "mock" in ENABLED_SOURCES:
-            self.sources["mock"] = MockDataSource()
+            self.sources["mock"] = self._wrap_source(MockDataSource())
         if "ctrip" in ENABLED_SOURCES:
             src = CtripDataSource()
             if src.is_available():
-                self.sources["ctrip"] = src
+                self.sources["ctrip"] = self._wrap_source(src)
         if "ctrip_browser" in ENABLED_SOURCES:
-            src = CtripBrowserSource()  # async v4: uses shared browser pool
+            src = CtripBrowserSource()  # async: uses shared browser pool
             if src.is_available():
-                self.sources["ctrip_browser"] = src
+                self.sources["ctrip_browser"] = self._wrap_source(src)
         if "skyscanner" in ENABLED_SOURCES:
             src = SkyscannerSource()
             if src.is_available():
-                self.sources["skyscanner"] = src
+                self.sources["skyscanner"] = self._wrap_source(src)
         if "bing" in ENABLED_SOURCES:
             src = BingSearchSource()
             if src.is_available():
-                self.sources["bing"] = src
+                # Bing uses sync Playwright — wrap in thread-pool adapter
+                self.sources["bing"] = AsyncBingSearchSource()
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _wrap_source(source) -> AsyncScraperBase:
+        """Wrap any source into a uniform async adapter.
+
+        - Sources with async_search_flights → returned as-is
+        - Sources with async search_flights → wrapped in _AsyncMethodAdapter
+        - Sources with sync search_flights → wrapped in _SyncToAsyncAdapter
+        """
+        if hasattr(source, 'async_search_flights'):
+            return source
+        if hasattr(source, 'search_flights'):
+            if inspect.iscoroutinefunction(source.search_flights):
+                return _AsyncMethodAdapter(source)
+            return _SyncToAsyncAdapter(source)
+        # Fallback: wrap in generic adapter
+        return _SyncToAsyncAdapter(source)
 
     @property
     def is_running(self) -> bool:
@@ -187,18 +238,20 @@ class PriceMonitor:
                     logger.error(f"Error checking query {q.id}: {e}")
 
     def check_query(self, query: SearchQuery) -> List[FlightPrice]:
-        """Check prices for a single query and store results."""
+        """Check prices for a single query and store results.
+
+        S1: Uses a single asyncio.run() to coordinate all sources uniformly,
+        avoiding per-source event loop creation.
+        """
+        return asyncio.run(self._check_query_async(query))
+
+    async def _check_query_async(self, query: SearchQuery) -> List[FlightPrice]:
+        """Async implementation: iterates all sources via their async adapters."""
         all_prices: List[FlightPrice] = []
 
         for source_name, source in self.sources.items():
             try:
-                # Auto-detect async sources (e.g. ctrip_browser) and run them
-                # in a temporary event loop within the threadpool worker.
-                sf = source.search_flights
-                if inspect.iscoroutinefunction(sf):
-                    prices = asyncio.run(sf(query))
-                else:
-                    prices = sf(query)
+                prices = await source.async_search_flights(query)
                 if prices:
                     # Filter out records with invalid price (None / NaN / non-positive)
                     # so downstream min()/sort()/alert comparisons don't crash.
@@ -224,7 +277,7 @@ class PriceMonitor:
         if not all_prices and "mock" in self.sources:
             logger.info("  No real data, falling back to mock...")
             try:
-                prices = self.sources["mock"].search_flights(query)
+                prices = await self.sources["mock"].async_search_flights(query)
                 if prices:
                     valid = [p for p in prices
                              if p.price is not None and p.price == p.price and p.price > 0]
@@ -296,11 +349,14 @@ class PriceMonitor:
         )
 
     def search_once(self, query: SearchQuery) -> List[FlightPrice]:
+        """One-shot search across all sources. S1: single asyncio.run()."""
+        return asyncio.run(self._search_once_async(query))
+
+    async def _search_once_async(self, query: SearchQuery) -> List[FlightPrice]:
         all_prices: List[FlightPrice] = []
         for source_name, source in self.sources.items():
             try:
-                sf = source.search_flights
-                prices = asyncio.run(sf(query)) if inspect.iscoroutinefunction(sf) else sf(query)
+                prices = await source.async_search_flights(query)
                 all_prices.extend(prices)
             except Exception as e:
                 logger.error(f"[{source_name}] Error: {e}")
