@@ -7,7 +7,7 @@ Run as:  python transfer_prices.py
 (NOT imported — module-level code writes to the DB.)
 """
 import sys, os, random
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import datetime
 from core.database import Database
 from config import DB_PATH, POPULAR_ROUTES

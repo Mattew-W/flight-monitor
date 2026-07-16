@@ -4,7 +4,7 @@ Real data (is_mock=0) is NEVER touched — it must accumulate naturally
 via the monitoring engine running over multiple days.
 """
 import random, sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import datetime, timedelta
 from core.database import Database
 from config import DB_PATH

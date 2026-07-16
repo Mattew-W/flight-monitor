@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-import sys; sys.path.insert(0, '.')
-from flight_monitor.core.database import Database
-db = Database('flight_monitor/flight_monitor.db')
+import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.database import Database
+db = Database('flight_monitor.db')
 conn = db._get_conn()
 
 # Check real data (is_mock=0)

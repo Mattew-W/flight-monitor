@@ -11,7 +11,7 @@
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from flight_monitor.core.ml_predictor import (
@@ -135,7 +135,7 @@ def main():
     print("=" * 60)
 
     # Load data
-    db = Database("flight_monitor/flight_monitor.db")
+    db = Database("flight_monitor.db")
     conn = db._get_conn()
     row = conn.execute('''
         SELECT q.id, COUNT(pr.id) as cnt

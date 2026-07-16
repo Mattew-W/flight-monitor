@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, List
 
 # Add project root
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from flight_monitor.core.predictor.indian_prior import IndianPriorExtractor
 

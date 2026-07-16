@@ -3,7 +3,7 @@
 import json
 import sys
 import urllib.request
-sys.path.insert(0, "D:/WORKbuddy1/航班监测/flight_monitor")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE = "http://127.0.0.1:5566"
 
