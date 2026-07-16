@@ -12,6 +12,25 @@ let lastDashboardUpdate = null;
 let searchFilters = { stops: "all", time: "all", priceMin: null, priceMax: null };
 let currentSearchResults = null;  // cached for filtering
 
+// ── Performance: Request Cache ────────────────────────────────
+const _apiCache = new Map();
+const _apiCacheTTL = 30000; // 30 seconds cache for semi-static data
+function cachedApi(url, ttl = _apiCacheTTL) {
+    const now = Date.now();
+    if (_apiCache.has(url)) {
+        const { data, ts } = _apiCache.get(url);
+        if (now - ts < ttl) return Promise.resolve(data);
+    }
+    return api(url).then(data => {
+        _apiCache.set(url, { data, ts: now });
+        return data;
+    });
+}
+function invalidateApiCache(url) {
+    if (url) _apiCache.delete(url);
+    else _apiCache.clear();
+}
+
 // ── Security helpers ──────────────────────────────────────────
 function escapeHTML(str) {
     if (str == null) return "";
@@ -97,15 +116,30 @@ function showSkeleton(containerId, count = 3) {
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
     initTheme();
-    loadCities();
-    loadPlatforms();
-    loadPopularRoutes();
     setupNavigation();
     setupForms();
     setupKeyboardNav();
     setupFilterBar();
-    refreshAll();
-    checkMonitorStatus();
+    
+    // Parallel load all independent data sources
+    const essential = Promise.all([
+        loadCities(),
+        loadPlatforms(),
+        loadPopularRoutes(),
+        checkMonitorStatus(),
+    ]);
+    
+    // Defer non-critical dashboard data to after first paint
+    essential.then(() => {
+        // Use requestIdleCallback or setTimeout to avoid blocking first paint
+        if (window.requestIdleCallback) {
+            requestIdleCallback(() => refreshAll(), { timeout: 2000 });
+        } else {
+            setTimeout(refreshAll, 0);
+        }
+    });
+    
+    // Background refresh when monitor is running
     setInterval(() => {
         if (currentMonitorRunning) { refreshDashboard(); loadDashboardQueries(); }
     }, 60000);
@@ -171,7 +205,7 @@ function setupNavigation() {
             if (page === "dashboard") { refreshDashboard(); loadDashboardQueries(); }
             if (page === "search") loadQueries();
             if (page === "trends") loadTrendSelect();
-            if (page === "alerts") { loadAlerts(); loadAlertHistory(); loadAlertQuerySelect(); }
+            if (page === "alerts") { loadAlerts(); loadAlertHistory(); }
             if (page === "platforms") renderPlatforms();
         });
     });
@@ -227,8 +261,8 @@ function toast(msg, type = "", duration = 3500) {
 async function loadCities() {
     try {
         const [cities, groups] = await Promise.all([
-            api("/api/cities"),
-            api("/api/city-groups"),
+            cachedApi("/api/cities", 300000),   // cache 5 min
+            cachedApi("/api/city-groups", 300000),
         ]);
         const dep = document.getElementById("departure");
         const dest = document.getElementById("destination");
@@ -252,7 +286,7 @@ async function loadCities() {
 // ── Platforms ────────────────────────────────────────────────
 async function loadPlatforms() {
     try {
-        const platforms = await api("/api/platforms");
+        const platforms = await cachedApi("/api/platforms", 300000); // cache 5 min
         platforms.forEach(p => {
             platformsData[p.key] = p;
         });
@@ -266,7 +300,7 @@ function getPlatformInfo(key) {
 // ── Popular Routes ───────────────────────────────────────────
 async function loadPopularRoutes() {
     try {
-        popularRoutesData = await api("/api/popular-routes");
+        popularRoutesData = await cachedApi("/api/popular-routes", 300000); // cache 5 min
         renderPopularRoutes();
     } catch (e) { console.error("Failed to load popular routes:", e); }
 }
@@ -617,7 +651,8 @@ function setupForms() {
             const result = await api("/api/queries", "POST", data);
             toast("正在搜索多平台航班价格...", "");
             await searchNow(result.id);
-            loadQueries();
+            _queriesCache = null;
+            loadQueriesShared(true);
         } catch (e) { toast("创建失败: " + e.message, "error"); }
     });
 
@@ -643,8 +678,37 @@ function setupForms() {
 // ── Refresh All ──────────────────────────────────────────────
 function refreshAll() {
     refreshDashboard();
-    loadDashboardQueries();
-    loadQueries();
+    // Load queries once and share between dashboard and search page
+    loadQueriesShared();
+}
+
+// ── Shared Queries Loader (avoids duplicate /api/queries calls) ──
+let _queriesCache = null;
+let _queriesCacheTs = 0;
+const _queriesCacheTTL = 15000; // 15s for query data (more dynamic)
+
+async function loadQueriesShared(force = false) {
+    const now = Date.now();
+    if (!force && _queriesCache && now - _queriesCacheTs < _queriesCacheTTL) {
+        // Use cached data
+        renderDashboardQueries(_queriesCache.user);
+        renderSearchQueries(_queriesCache.user, _queriesCache.seed);
+        return _queriesCache;
+    }
+    try {
+        const [userQueries, seedQueries] = await Promise.all([
+            api("/api/queries?scope=user"),
+            api("/api/queries?scope=seed"),
+        ]);
+        _queriesCache = { user: userQueries, seed: seedQueries };
+        _queriesCacheTs = now;
+        renderDashboardQueries(userQueries);
+        renderSearchQueries(userQueries, seedQueries);
+        return _queriesCache;
+    } catch (e) {
+        console.error("Load queries error:", e);
+        return null;
+    }
 }
 
 // ── Dashboard ────────────────────────────────────────────────
@@ -655,7 +719,7 @@ async function refreshDashboard() {
         routeList.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
     }
     try {
-        const data = await api("/api/dashboard");
+        const data = await cachedApi("/api/dashboard", 15000); // 15s cache
         routeList.dataset.loaded = "1";
         dashboardDataCache = data;
         lastDashboardUpdate = Date.now();
@@ -733,21 +797,27 @@ async function refreshDashboard() {
 }
 
 // ── Dashboard Query List (with action buttons) ────────────────
-async function loadDashboardQueries() {
+function renderDashboardQueries(userQueries) {
     const list = document.getElementById("dashboardQueryList");
     if (!list) return;
-    if (!list.dataset.loaded) {
+    list.dataset.loaded = "1";
+    if (userQueries.length === 0) {
+        list.innerHTML = `<div class="empty-state"><p>暂无任务，请切换到「搜索比价」页面添加</p></div>`;
+    } else {
+        list.innerHTML = userQueries.map(queryItemTpl).join("");
+    }
+    updateQueryBatchBar();
+}
+
+// Legacy alias — kept for compatibility with navigation clicks
+async function loadDashboardQueries() {
+    const list = document.getElementById("dashboardQueryList");
+    if (list && !list.dataset.loaded) {
         list.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
     }
-    try {
-        const userQueries = await api("/api/queries?scope=user");
-        list.dataset.loaded = "1";
-        if (userQueries.length === 0) {
-            list.innerHTML = `<div class="empty-state"><p>暂无任务，请切换到「搜索比价」页面添加</p></div>`;
-        } else {
-            list.innerHTML = userQueries.map(queryItemTpl).join("");
-        }
-    } catch (e) { console.error("Load dashboard queries error:", e); }
+    const data = await loadQueriesShared();
+    if (!data) return;
+    renderDashboardQueries(data.user);
 }
 
 // ── Queries ──────────────────────────────────────────────────
@@ -785,29 +855,26 @@ const queryItemTpl = q => `
         </div>
     </div>`;
 
+function renderSearchQueries(userQueries, seedQueries) {
+    const list = document.getElementById("queryList");
+    if (list) list.dataset.loaded = "1";
+    if (userQueries.length === 0) {
+        if (list) list.innerHTML = `<div class="empty-state"><p>暂无任务，请在上方添加</p></div>`;
+    } else {
+        if (list) list.innerHTML = userQueries.map(queryItemTpl).join("");
+    }
+    updateSelects(userQueries, seedQueries || []);
+    updateQueryBatchBar();
+}
+
 async function loadQueries() {
     const list = document.getElementById("queryList");
     if (list && !list.dataset.loaded) {
         list.innerHTML = '<div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div>';
     }
-    try {
-        // Fetch user queries (backend filter) for the main list
-        const userQueries = await api("/api/queries?scope=user");
-        if (list) list.dataset.loaded = "1";
-        if (userQueries.length === 0) {
-            list.innerHTML = `<div class="empty-state"><p>暂无任务，请在上方添加</p></div>`;
-        } else {
-            list.innerHTML = userQueries.map(queryItemTpl).join("");
-        }
-        // Also fetch seed queries (lightweight) for trend/alert dropdowns
-        let seedQueries = [];
-        try {
-            seedQueries = await api("/api/queries?scope=seed");
-        } catch (e) {
-            console.warn("Failed to load seed queries for dropdowns:", e);
-        }
-        updateSelects(userQueries, seedQueries);
-    } catch (e) { console.error("Load queries error:", e); }
+    const data = await loadQueriesShared();
+    if (!data) return;
+    renderSearchQueries(data.user, data.seed);
 }
 
 function updateSelects(userQueries, seedQueries) {
@@ -849,8 +916,8 @@ async function toggleMonitoring(queryId, enable) {
     try {
         await api(`/api/queries/${queryId}/monitoring`, "PUT", { is_monitoring: enable });
         toast(enable ? "已开启监控" : "已停止监控", "success");
-        loadQueries();
-        loadDashboardQueries();
+        _queriesCache = null; // invalidate cache
+        loadQueriesShared(true);
     } catch (e) { toast("操作失败", "error"); }
 }
 
@@ -859,8 +926,8 @@ async function deleteQuery(queryId) {
     try {
         await api(`/api/queries/${queryId}`, "DELETE");
         toast("已删除", "success");
-        loadQueries();
-        loadDashboardQueries();
+        _queriesCache = null; // invalidate cache
+        loadQueriesShared(true);
         refreshDashboard();
     } catch (e) { toast("删除失败", "error"); }
 }
@@ -931,8 +998,8 @@ async function batchDeleteQueries() {
     }
     if (success > 0) toast(`已删除 ${success} 个任务${fail > 0 ? `，${fail} 个失败` : ""}`, fail > 0 ? "warning" : "success");
     selectedQueryIds.clear();
-    loadQueries();
-    loadDashboardQueries();
+    _queriesCache = null;
+    loadQueriesShared(true);
     refreshDashboard();
 }
 
@@ -951,8 +1018,8 @@ async function clearAllQueries() {
     }
     if (success > 0) toast(`已清空 ${success} 个任务${fail > 0 ? `，${fail} 个失败` : ""}`, fail > 0 ? "warning" : "success");
     selectedQueryIds.clear();
-    loadQueries();
-    loadDashboardQueries();
+    _queriesCache = null;
+    loadQueriesShared(true);
     refreshDashboard();
 }
 
@@ -1004,7 +1071,8 @@ async function searchNow(queryId) {
             const s4 = document.getElementById("step-4");
             if (s4) s4.classList.add("active");
             showSearchResults(result, queryId);
-            loadQueries();
+            _queriesCache = null;
+            loadQueriesShared(true);
             refreshDashboard();
         } catch (e) {
             clearTimeout(timers[0]);
@@ -1018,7 +1086,8 @@ async function searchNow(queryId) {
         try {
             const result = await api(`/api/queries/${queryId}/search`, "POST");
             showSearchResults(result, queryId);
-            loadQueries();
+            _queriesCache = null;
+            loadQueriesShared(true);
             refreshDashboard();
         } catch (e) { toast("搜索失败: " + e.message, "error"); }
     }
@@ -1727,10 +1796,15 @@ async function loadAlerts() {
         const list = document.getElementById("alertList");
         if (alerts.length === 0) {
             list.innerHTML = `<div class="empty-state"><p>暂无价格提醒</p></div>`;
+            updateAlertBatchBar();
             return;
         }
         list.innerHTML = alerts.map(a => `
-            <div class="alert-config-item">
+            <div class="alert-config-item${selectedAlertIds.has(a.id) ? ' selected' : ''}" id="alertItem${a.id}">
+                <input type="checkbox" class="alert-item-checkbox"
+                    ${selectedAlertIds.has(a.id) ? 'checked' : ''}
+                    onchange="toggleAlertSelection(${a.id})"
+                    aria-label="选择提醒 ${escapeHTML(a.query_route)}">
                 <div class="alert-config-info">
                     <div class="alert-config-route">${escapeHTML(a.query_route)} ${a.query_label && a.query_label !== a.query_route ? "· " + escapeHTML(a.query_label) : ""}</div>
                     <div class="alert-config-detail">
@@ -1747,6 +1821,7 @@ async function loadAlerts() {
                 </div>
             </div>
         `).join("");
+        updateAlertBatchBar();
     } catch (e) { console.error("Load alerts error:", e); }
 }
 
@@ -1773,7 +1848,8 @@ async function loadAlertHistory() {
 }
 
 async function loadAlertQuerySelect() {
-    await loadQueries();
+    // Use shared cache — no extra API call needed
+    await loadQueriesShared();
 }
 
 async function toggleAlert(alertId, enable) {
@@ -1790,6 +1866,91 @@ async function deleteAlert(alertId) {
         toast("已删除", "success");
         loadAlerts();
     } catch (e) { toast("删除失败", "error"); }
+}
+
+// ── Batch Alert Operations ──────────────────────────────────
+function toggleAlertSelection(alertId) {
+    if (selectedAlertIds.has(alertId)) {
+        selectedAlertIds.delete(alertId);
+    } else {
+        selectedAlertIds.add(alertId);
+    }
+    updateAlertBatchBar();
+    const item = document.getElementById("alertItem" + alertId);
+    if (item) item.classList.toggle("selected", selectedAlertIds.has(alertId));
+}
+
+function toggleSelectAllAlerts(checked) {
+    const checkboxes = document.querySelectorAll(".alert-item-checkbox");
+    checkboxes.forEach(cb => {
+        cb.checked = checked;
+        const id = parseInt(cb.closest(".alert-config-item").id.replace("alertItem", ""), 10);
+        if (checked) selectedAlertIds.add(id);
+        else selectedAlertIds.delete(id);
+    });
+    document.querySelectorAll(".alert-config-item").forEach(el => {
+        el.classList.toggle("selected", checked);
+    });
+    updateAlertBatchBar();
+}
+
+function updateAlertBatchBar() {
+    const bar = document.getElementById("alertBatchBar");
+    const count = selectedAlertIds.size;
+    const total = document.querySelectorAll(".alert-config-item").length;
+    const countEl = document.getElementById("alertBatchCount");
+    const delBtn = document.getElementById("alertBatchDelete");
+    const clearBtn = document.getElementById("alertBatchClear");
+    const allCb = document.getElementById("alertBatchAll");
+    
+    if (total > 0) {
+        bar.classList.add("show");
+        countEl.textContent = `已选 ${count}`;
+        delBtn.disabled = count === 0;
+        clearBtn.disabled = false;
+        allCb.checked = count === total && total > 0;
+        allCb.indeterminate = count > 0 && count < total;
+    } else {
+        bar.classList.remove("show");
+        countEl.textContent = "已选 0";
+        delBtn.disabled = true;
+        clearBtn.disabled = true;
+    }
+}
+
+async function batchDeleteAlerts() {
+    const ids = [...selectedAlertIds];
+    if (ids.length === 0) return;
+    if (!confirm(`确定要删除选中的 ${ids.length} 个价格提醒吗？`)) return;
+    
+    let success = 0, fail = 0;
+    for (const id of ids) {
+        try {
+            await api(`/api/alerts/${id}`, "DELETE");
+            success++;
+        } catch (e) { fail++; }
+    }
+    if (success > 0) toast(`已删除 ${success} 个提醒${fail > 0 ? `，${fail} 个失败` : ""}`, fail > 0 ? "warning" : "success");
+    selectedAlertIds.clear();
+    loadAlerts();
+}
+
+async function clearAllAlerts() {
+    const items = document.querySelectorAll(".alert-config-item");
+    if (items.length === 0) return;
+    if (!confirm(`确定要清空所有 ${items.length} 个价格提醒吗？此操作不可恢复！`)) return;
+    
+    let success = 0, fail = 0;
+    for (const el of items) {
+        const id = parseInt(el.id.replace("alertItem", ""), 10);
+        try {
+            await api(`/api/alerts/${id}`, "DELETE");
+            success++;
+        } catch (e) { fail++; }
+    }
+    if (success > 0) toast(`已清空 ${success} 个提醒${fail > 0 ? `，${fail} 个失败` : ""}`, fail > 0 ? "warning" : "success");
+    selectedAlertIds.clear();
+    loadAlerts();
 }
 
 // ── Platforms Page ───────────────────────────────────────────
@@ -1866,8 +2027,9 @@ async function toggleMonitor() {
             await api("/api/monitor/stop", "POST");
             toast("监控已停止", "warning");
         } else {
-            const queries = await api("/api/queries");
-            const monitoring = queries.filter(q => q.is_monitoring);
+            // Use cached queries to check monitoring status
+            const data = await loadQueriesShared();
+            const monitoring = data && data.user ? data.user.filter(q => q.is_monitoring) : [];
             if (monitoring.length === 0) {
                 toast("请先添加并开启监控任务", "warning");
                 return;

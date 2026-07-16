@@ -67,6 +67,41 @@
     }
 }
 
+/* ── Manual Dark Mode Override ────────────────────────────── */
+[data-theme="dark"] {
+    --bg: #0f172a;
+    --bg-gradient: linear-gradient(160deg, #0f172a 0%, #1e293b 40%, #0f172a 100%);
+    --surface: rgba(30, 41, 59, 0.85);
+    --surface-solid: #1e293b;
+    --surface-hover: rgba(51, 65, 85, 0.6);
+    --border: rgba(51, 65, 85, 0.5);
+    --border-light: rgba(51, 65, 85, 0.3);
+    --text: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --shadow: 0 1px 3px rgba(0,0,0,.2);
+    --shadow-md: 0 8px 24px -4px rgba(0,0,0,.3);
+    --shadow-lg: 0 16px 32px -8px rgba(0,0,0,.4);
+    --shadow-xl: 0 24px 48px -12px rgba(0,0,0,.5);
+}
+
+[data-theme="light"] {
+    --bg: #f8fafc;
+    --bg-gradient: linear-gradient(160deg, #f0f4ff 0%, #f8fafc 40%, #faf5ff 100%);
+    --surface: rgba(255, 255, 255, 0.85);
+    --surface-solid: #ffffff;
+    --surface-hover: rgba(248, 250, 252, 0.95);
+    --border: rgba(226, 232, 240, 0.6);
+    --border-light: rgba(241, 245, 249, 0.5);
+    --text: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --shadow: 0 1px 3px rgba(0,0,0,.04), 0 1px 2px rgba(0,0,0,.02);
+    --shadow-md: 0 8px 24px -4px rgba(0,0,0,.06), 0 4px 8px -4px rgba(0,0,0,.03);
+    --shadow-lg: 0 16px 32px -8px rgba(0,0,0,.08), 0 8px 16px -6px rgba(0,0,0,.04);
+    --shadow-xl: 0 24px 48px -12px rgba(0,0,0,.12), 0 12px 24px -8px rgba(0,0,0,.06);
+}
+
 * { margin:0; padding:0; box-sizing:border-box; }
 
 body {
@@ -1209,6 +1244,246 @@ body {
     transition: opacity .3s ease;
 }
 .sidebar-overlay.show { display: block; opacity: 1; }
+
+/* ── Filter Bar ───────────────────────────────────────────── */
+.filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    margin-bottom: 16px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    flex-wrap: wrap;
+    animation: batchBarIn .25s ease;
+}
+.filter-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.filter-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 4px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+}
+.filter-chip {
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1.5px solid var(--border);
+    border-radius: 20px;
+    background: var(--surface-solid);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition);
+    white-space: nowrap;
+}
+.filter-chip:hover { border-color: var(--primary); color: var(--primary); }
+.filter-chip.active { background: var(--primary); color: white; border-color: var(--primary); }
+.filter-divider {
+    width: 1px;
+    height: 24px;
+    background: var(--border);
+    flex-shrink: 0;
+}
+.filter-range {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.filter-range input {
+    width: 80px;
+    padding: 5px 10px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    background: var(--surface-solid);
+    color: var(--text);
+    outline: none;
+    transition: var(--transition);
+}
+.filter-range input:focus { border-color: var(--primary); }
+.filter-range span { color: var(--text-muted); font-size: 12px; }
+.filter-reset {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 6px;
+    transition: var(--transition);
+    margin-left: auto;
+}
+.filter-reset:hover { background: var(--primary-bg); }
+
+/* ── Batch Action Bar ─────────────────────────────────────── */
+.batch-action-bar {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    margin-bottom: 14px;
+    background: linear-gradient(135deg, var(--primary-bg), #e0e7ff);
+    border: 1px solid rgba(59, 130, 246, .15);
+    border-radius: var(--radius-sm);
+    animation: batchBarIn .25s ease;
+}
+.batch-action-bar.show { display: flex; }
+@keyframes batchBarIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+.batch-checkbox-all {
+    width: 18px; height: 18px;
+    cursor: pointer;
+    accent-color: var(--primary);
+    flex-shrink: 0;
+}
+.batch-action-bar label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+.batch-action-bar .batch-count {
+    font-size: 12px;
+    color: var(--primary);
+    font-weight: 700;
+    background: white;
+    padding: 2px 10px;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.batch-action-bar .batch-spacer { flex: 1; }
+.batch-btn {
+    padding: 7px 14px;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: var(--transition);
+    white-space: nowrap;
+}
+.batch-btn-danger {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1.5px solid rgba(239, 68, 68, .2);
+}
+.batch-btn-danger:hover { background: var(--danger); color: white; }
+.batch-btn-danger:disabled { opacity: .4; cursor: not-allowed; }
+.batch-btn-danger:disabled:hover { background: var(--danger-bg); color: var(--danger); }
+.batch-btn-clear {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1.5px solid var(--border);
+}
+.batch-btn-clear:hover { background: var(--warning-bg); color: var(--warning); border-color: var(--warning); }
+.batch-btn-clear:disabled { opacity: .4; cursor: not-allowed; }
+.batch-btn-clear:disabled:hover { background: transparent; color: var(--text-muted); border-color: var(--border); }
+
+/* ── Theme Toggle Button ──────────────────────────────────── */
+.theme-toggle {
+    width: 100%;
+    padding: 10px 16px;
+    border: 1.5px solid var(--border);
+    background: var(--surface-solid);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+    transition: var(--transition);
+    font-family: inherit;
+}
+.theme-toggle:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-bg); }
+.theme-toggle svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+/* ── Data Freshness Indicator ─────────────────────────────── */
+.freshness {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+.freshness-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    flex-shrink: 0;
+}
+.freshness-dot.stale { background: var(--warning); }
+.freshness-dot.old { background: var(--text-muted); }
+
+/* ── Quick Stats Bar ──────────────────────────────────────── */
+.quick-stats {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 12px 18px;
+    margin-bottom: 20px;
+    background: var(--surface);
+    backdrop-filter: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow);
+    flex-wrap: wrap;
+}
+.quick-stat {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.quick-stat-value {
+    font-weight: 800;
+    color: var(--primary);
+}
+
+/* ── Query Item Checkbox ──────────────────────────────────── */
+.query-item {
+    position: relative;
+}
+.query-item-checkbox {
+    width: 18px; height: 18px;
+    cursor: pointer;
+    accent-color: var(--primary);
+    flex-shrink: 0;
+    margin-right: 4px;
+}
+.query-item.selected {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, .1);
+    background: var(--primary-bg) !important;
+}
+
+/* ── Alert Item Checkbox ──────────────────────────────────── */
+.alert-config-item {
+    position: relative;
+}
+.alert-item-checkbox {
+    width: 18px; height: 18px;
+    cursor: pointer;
+    accent-color: var(--primary);
+    flex-shrink: 0;
+    margin-right: 4px;
+}
+.alert-config-item.selected {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, .1);
+    background: var(--primary-bg) !important;
+}
 
 /* ── Fade In animation ────────────────────────────────────── */
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
