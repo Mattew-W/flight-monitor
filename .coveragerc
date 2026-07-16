@@ -1,0 +1,27 @@
+# ── S2: Coverage Configuration ────────────────────────────────
+[run]
+branch = True
+source = flight_monitor
+omit =
+    */tests/*
+    */test_*/ 
+    */__pycache__/*
+    */migrations/*
+    */tools/*
+    */worktrees/*
+    flight_monitor/__init__.py
+
+[report]
+# Minimum coverage threshold (target: 70% for core/)
+fail_under = 0
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+
+[html]
+html_dir = htmlcov
