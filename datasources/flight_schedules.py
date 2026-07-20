@@ -39,6 +39,11 @@ FLIGHT_SCHEDULES = {
     "MU3619": {"dep": "20:00", "arr": "22:15", "duration_min": 135, "aircraft": "波音 737", "dep_airport": "", "arr_airport": "", "airline": "东方航空", "dep_city": "", "arr_city": ""},
     "MU6873": {"dep": "14:00", "arr": "16:30", "duration_min": 150, "aircraft": "波音 737", "dep_airport": "", "arr_airport": "", "airline": "东方航空", "dep_city": "", "arr_city": ""},
     "MU8201": {"dep": "12:00", "arr": "14:25", "duration_min": 145, "aircraft": "空客 320", "dep_airport": "", "arr_airport": "", "airline": "东方航空", "dep_city": "", "arr_city": ""},
+    # ── User-queried flights (added 2026-07-20) ──
+    "MU6950": {"dep": "11:50", "arr": "13:55", "duration_min": 125, "aircraft": "波音 737-800", "dep_airport": "NGB", "arr_airport": "CAN", "airline": "东方航空", "dep_city": "宁波", "arr_city": "广州"},
+    "MU6952": {"dep": "13:00", "arr": "15:40", "duration_min": 160, "aircraft": "空客 A321neo", "dep_airport": "BHY", "arr_airport": "PVG", "airline": "东方航空", "dep_city": "北海", "arr_city": "上海"},
+    "MU6953": {"dep": "08:55", "arr": "12:45", "duration_min": 230, "aircraft": "空客 320", "dep_airport": "PVG", "arr_airport": "XNN", "airline": "东方航空", "dep_city": "上海", "arr_city": "西宁"},
+    "MU6959": {"dep": "07:55", "arr": "12:05", "duration_min": 250, "aircraft": "空客 A321", "dep_airport": "PKX", "arr_airport": "HAK", "airline": "东方航空", "dep_city": "北京", "arr_city": "海口"},
 
     # ── 南方航空 (CZ) ──
     "CZ8882": {"dep": "11:05", "arr": "13:30", "duration_min": 145, "aircraft": "空客 321", "dep_airport": "", "arr_airport": "", "airline": "南方航空", "dep_city": "", "arr_city": ""},
