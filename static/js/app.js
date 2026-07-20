@@ -482,7 +482,7 @@ async function onFlightNoInput() {
                     if (quickFlightData && quickFlightData.found) {
                         infoText.textContent = `${quickFlightData.airline} ${fn} | 航线未知(Bing也未找到)，请补充${hintDep ? '目的地' : '出发地和目的地'}`;
                     } else if (hintDep) {
-                        infoText.textContent = `${hintAirline || fn} | 未找到航线，已根据航司基城预填出发地为"${hintDep}"，请确认或修改`;
+                        infoText.textContent = `${hintAirline || fn} | 未找到航线，已根据航司基地预填出发地为"${hintDep}"，请确认或修改`;
                     } else {
                         infoText.textContent = "航班号未找到，请手动输入出发地和目的地";
                     }

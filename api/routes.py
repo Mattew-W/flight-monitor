@@ -382,6 +382,19 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             # (NOT check_query which stops at first successful source)
             prices = monitor.search_once(q)
 
+            # 1b. Persist results to price_records so the predict endpoint
+            # (which reads price_records) has data to chart. Background
+            # monitor loop does this in check_query (monitor.py:389);
+            # the manual search path was missing it. Failures here are
+            # non-fatal — search results still get returned to the UI.
+            try:
+                db.add_price_records(prices)
+            except Exception:
+                logger.warning(
+                    f"search_now: failed to persist prices for query {query_id}",
+                    exc_info=True,
+                )
+
             # 2. Dispatch to Aggregator for O(N) high-speed processing
             from core.aggregator import FlightAggregator
             result = FlightAggregator.process_search_results(q, prices)
@@ -761,6 +774,17 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
                     sched["arr_airport"] = sched.get("arr_airport") or inferred.get("arr_airport", "")
             if sched.get("dep_city") and sched.get("arr_city"):
                 sched["found"] = True
+                # Local DB hit — clear any stuck Bing negative-cache entry
+                # for this flight number so future direct Bing lookups
+                # don't keep failing on a stale miss.
+                try:
+                    from datasources.bing_search_source import BingSearchSource
+                    bing = BingSearchSource()
+                    if flight_no.upper() in bing._route_negative_cache:
+                        del bing._route_negative_cache[flight_no.upper()]
+                        bing._save_route_cache()
+                except Exception:
+                    pass
                 return jsonify(sched)
         # Not found in local DB — return airline base hint so the frontend
         # can pre-fill the departure city instead of leaving it blank.

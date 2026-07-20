@@ -60,9 +60,10 @@ class BingSearchSource(BaseDataSource):
         # In-memory cache for route lookups (flight_no -> result)
         self._route_cache: dict = {}
         # Negative results cache with TTL (flight_no -> expiry_timestamp)
-        # Default TTL: 24 hours. After expiry, the lookup is retried.
+        # Default TTL: 1 hour. After expiry, the lookup is retried.
         self._route_negative_cache: dict = {}  # {fn: expiry_unix_ts}
-        self._negative_cache_ttl = 86400  # 24 hours
+        self._negative_cache_ttl = 3600  # 1 hour (was 24h; reduced to avoid
+        # long "stuck" misses when Bing HTML parser breaks for a specific FN)
         self._route_cache_file = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "data", "bing_route_cache.json"
@@ -147,8 +148,27 @@ class BingSearchSource(BaseDataSource):
         result = self._parse_route_html(html, fn)
         if result:
             self._route_cache[fn] = result
+            # If we previously cached a "not found" for this FN, clear it —
+            # otherwise a transient parse failure would have stuck the
+            # negative entry for 1h and masked later successes.
+            if fn in self._route_negative_cache:
+                del self._route_negative_cache[fn]
         else:
             self._route_negative_cache[fn] = time.time() + self._negative_cache_ttl
+            # Diagnostic: log a short HTML snippet so we can see why the
+            # parse failed. Strip <script>/<style> first to keep logs small.
+            try:
+                stripped = re.sub(
+                    r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE
+                )
+                stripped = re.sub(r'<[^>]+>', ' ', stripped)
+                stripped = re.sub(r'\s+', ' ', stripped).strip()
+                snippet = stripped[:300]
+            except Exception:
+                snippet = "<strip failed>"
+            logger.info(
+                f"[bing] Route parse failed for {fn}; HTML snippet: {snippet!r}"
+            )
         self._save_route_cache()
         return result
 
