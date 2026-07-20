@@ -365,6 +365,7 @@ class MockDataSource(BaseDataSource):
         _rng = random.Random(seed_base)
 
         # Days until departure affects price
+        now = datetime.now()
         try:
             dep_date = datetime.strptime(query.departure_date, "%Y-%m-%d")
             days_until = max(0, (dep_date - now).days)
