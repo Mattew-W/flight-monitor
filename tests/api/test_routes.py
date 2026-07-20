@@ -53,7 +53,7 @@ class TestAPIAuth:
     def test_write_endpoint_blocked_with_api_key_set(self, flask_client,
                                                       monkeypatch):
         """When API_KEY is set, POST /api/queries should return 401 without header."""
-        monkeypatch.setattr("api.routes.API_KEY", "secret123")
+        monkeypatch.setattr("api._shared.API_KEY", "secret123")
         resp = flask_client.post("/api/queries", json={
             "departure": "北京", "destination": "上海", "departure_date": "2026-08-01"
         })
@@ -64,7 +64,7 @@ class TestAPIAuth:
     def test_write_endpoint_allowed_with_correct_key(self, flask_client,
                                                        monkeypatch):
         """POST /api/alerts with correct X-API-Key header should succeed."""
-        monkeypatch.setattr("api.routes.API_KEY", "secret123")
+        monkeypatch.setattr("api._shared.API_KEY", "secret123")
         headers = {"X-API-Key": "secret123"}
         resp = flask_client.post("/api/alerts", headers=headers, json={
             "query_id": 1, "target_price": 500
@@ -75,7 +75,7 @@ class TestAPIAuth:
     def test_write_requires_header_only_not_query_param(self, flask_client,
                                                           monkeypatch):
         """API key via ?api_key= query param should be rejected."""
-        monkeypatch.setattr("api.routes.API_KEY", "secret123")
+        monkeypatch.setattr("api._shared.API_KEY", "secret123")
         resp = flask_client.post(
             "/api/queries?api_key=secret123",
             json={"departure": "北京", "destination": "上海", "departure_date": "2026-08-01"},
