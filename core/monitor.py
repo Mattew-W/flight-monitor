@@ -20,12 +20,7 @@ from .notifier import Notifier
 from .async_scraper_base import AsyncScraperBase
 from .source_chain import SourceChain
 from .circuit_breaker import CircuitBreakerConfig
-from datasources import (
-    MockDataSource, CtripDataSource,
-    CtripBrowserSource, SkyscannerSource,
-    BingSearchSource,
-)
-from datasources.async_adapters import AsyncBingSearchSource
+from .model_store import ModelStore
 from config import (
     MONITOR_INTERVAL_SECONDS, ENABLED_SOURCES,
     SOURCE_PRIORITY, CIRCUIT_BREAKER_FAILURE_THRESHOLD,
@@ -37,6 +32,52 @@ logger = logging.getLogger(__name__)
 # ── Notification worker ─────────────────────────────────────────
 _MAX_NOTIFY_QUEUE = 200
 _NOTIFY_WORKERS = 2
+
+
+class _AsyncEventLoopThread:
+    """Background thread running a dedicated asyncio event loop.
+
+    This allows calling async code safely from sync Flask routes
+    without creating/destroying event loops per call (which is slow)
+    and without RuntimeError when called from an async context
+    (which asyncio.run() would cause).
+    """
+
+    def __init__(self):
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._started = threading.Event()
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._started.wait(timeout=5)
+
+    def _run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._started.set()
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+
+    def run(self, coro):
+        """Submit a coroutine to the event loop and block until done."""
+        if self._loop is None:
+            raise RuntimeError("Event loop thread not started")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=120)
+
+    def stop(self):
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+            self._loop = None
 
 
 class _NotifyWorker:
@@ -76,10 +117,10 @@ class _NotifyWorker:
         self._workers.clear()
 
     def enqueue(self, title: str, message: str,
-                send_email: bool, send_wechat: bool,
+                send_email: bool, send_wechat: bool, send_feishu: bool = True,
                 query_id: Optional[int] = None, price: Optional[float] = None):
         try:
-            self._queue.put_nowait((title, message, send_email, send_wechat,
+            self._queue.put_nowait((title, message, send_email, send_wechat, send_feishu,
                                     query_id, price))
         except queue.Full:
             logger.warning("Notify queue full, dropping notification")
@@ -87,10 +128,10 @@ class _NotifyWorker:
     def _run(self):
         while self._running or not self._queue.empty():
             try:
-                title, message, send_email, send_wechat, qid, price = self._queue.get(timeout=2)
+                title, message, send_email, send_wechat, send_feishu, qid, price = self._queue.get(timeout=2)
                 self._notifier.send_notification(
                     title=title, message=message,
-                    send_email=send_email, send_wechat=send_wechat,
+                    send_email=send_email, send_wechat=send_wechat, send_feishu=send_feishu,
                     query_id=qid, price=price,
                 )
                 self._queue.task_done()
@@ -142,6 +183,8 @@ class PriceMonitor:
         self.max_workers = max_workers
         self.notifier = Notifier()
         self._notify_worker = _NotifyWorker(self.notifier)
+        self._async_loop = _AsyncEventLoopThread()
+        self.model_store = ModelStore()
 
         # S4: Build SourceChain with circuit breakers
         self.source_chain = SourceChain("monitor")
@@ -166,31 +209,27 @@ class PriceMonitor:
         self._lock = threading.Lock()
 
     def _build_source_chain(self, cb_config: CircuitBreakerConfig):
-        """Build the source chain with priorities and circuit breakers."""
-        # Define source factory functions
-        source_factories = {
-            "mock": lambda: MockDataSource(),
-            "ctrip": lambda: CtripDataSource(),
-            "ctrip_browser": lambda: CtripBrowserSource(),
-            "skyscanner": lambda: SkyscannerSource(),
-            "bing": lambda: AsyncBingSearchSource(),
-        }
+        """Build the source chain from the registered sources.
 
-        # Add sources in priority order
-        for name in sorted(SOURCE_PRIORITY, key=lambda k: SOURCE_PRIORITY[k]):
-            if name not in ENABLED_SOURCES:
-                continue
-            if name not in source_factories:
-                continue
+        Priority order comes from ``SOURCE_PRIORITY``; availability is
+        checked via ``is_available()``; each source is auto-wrapped for
+        sync/async uniformity.
+        """
+        from datasources.base import create_source, list_sources
 
+        # Determine which sources to enable
+        enabled = ENABLED_SOURCES or list_sources().keys()
+
+        for name in sorted(enabled, key=lambda k: SOURCE_PRIORITY.get(k, 99)):
+            if name not in SOURCE_PRIORITY:
+                continue
             try:
-                src = source_factories[name]()
-                # Check availability (skip circuit breaker for mock - always available)
+                src = create_source(name)
+                # Skip unavailable sources (but allow mock)
                 if name != "mock" and hasattr(src, 'is_available') and not src.is_available():
                     logger.info(f"Source '{name}' not available, skipping")
                     continue
 
-                # Wrap in async adapter if needed
                 wrapped = self._wrap_source(src)
                 priority = SOURCE_PRIORITY[name]
 
@@ -202,10 +241,9 @@ class PriceMonitor:
                 logger.warning(f"Failed to initialize source '{name}': {e}")
 
         if len(self.source_chain) == 0:
-            # Ensure mock is always available as ultimate fallback
             logger.warning("No sources configured, adding mock as fallback")
             self.source_chain.add_source(
-                self._wrap_source(MockDataSource()),
+                self._wrap_source(create_source("mock")),
                 priority=99, circuit_breaker_config=None
             )
 
@@ -237,6 +275,7 @@ class PriceMonitor:
                 return
             self._running = True
             self._stop_event.clear()
+            self._async_loop.start()
             self._notify_worker.start()
             self._thread = threading.Thread(target=self._run_loop, daemon=True)
             self._thread.start()
@@ -249,10 +288,18 @@ class PriceMonitor:
                 return
             self._running = False
         self._stop_event.set()
-        self._notify_worker.stop()
+        # Join the monitor loop thread FIRST so it stops enqueuing
+        # notifications before we shut down the notify workers.
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        # Now safe to stop workers (no new tasks will arrive).
+        self._notify_worker.stop()
+        self._async_loop.stop()
+        # Shut down the monitor thread pool (if any) to avoid thread leaks.
+        if hasattr(self, "_pool"):
+            self._pool.shutdown(wait=False)
+            self._pool = None
         logger.info("Price monitor stopped")
 
     def _run_loop(self):
@@ -265,6 +312,13 @@ class PriceMonitor:
 
     def _check_all_concurrent(self):
         """Check all monitoring queries in parallel using ThreadPoolExecutor."""
+        # Reuse a fixed worker pool across cycles instead of creating a new
+        # ThreadPoolExecutor each period. Per-cycle creation leaks thread-local
+        # SQLite connections (they linger in db._all_conns after the thread dies).
+        if not hasattr(self, "_pool"):
+            self._pool = ThreadPoolExecutor(max_workers=self.max_workers,
+                                            thread_name_prefix="monitor")
+
         queries = self.db.get_monitoring_queries()
         if not queries:
             return
@@ -272,22 +326,22 @@ class PriceMonitor:
         workers = min(n, self.max_workers)
         logger.info(f"Checking {n} monitoring queries ({workers} workers)...")
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self.check_query, q): q for q in queries}
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    q = futures[future]
-                    logger.error(f"Error checking query {q.id}: {e}")
+        futures = {self._pool.submit(self.check_query, q): q for q in queries}
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                q = futures[future]
+                logger.error(f"Error checking query {q.id}: {e}")
 
     def check_query(self, query: SearchQuery) -> List[FlightPrice]:
         """Check prices for a single query and store results.
 
-        S1: Uses a single asyncio.run() to coordinate all sources uniformly,
-        avoiding per-source event loop creation.
+        S1: Uses the persistent event loop thread to coordinate all sources,
+        avoiding per-call event loop creation and working safely from both
+        sync and async Flask routes.
         """
-        return asyncio.run(self._check_query_async(query))
+        return self._async_loop.run(self._check_query_async(query))
 
     async def _check_query_async(self, query: SearchQuery) -> List[FlightPrice]:
         """S4: Use SourceChain for priority-based fallback with circuit breakers.
@@ -376,12 +430,13 @@ class PriceMonitor:
         self._notify_worker.enqueue(
             title=title, message=message,
             send_email=alert.notify_email, send_wechat=alert.notify_wechat,
+            send_feishu=alert.notify_feishu,
             query_id=query.id, price=flight.price,
         )
 
     def search_once(self, query: SearchQuery) -> List[FlightPrice]:
-        """One-shot search across all sources. S1: single asyncio.run()."""
-        return asyncio.run(self._search_once_async(query))
+        """One-shot search across all sources. S1: uses persistent event loop."""
+        return self._async_loop.run(self._search_once_async(query))
 
     async def _search_once_async(self, query: SearchQuery) -> List[FlightPrice]:
         """S4: Use SourceChain.search_all() for maximum coverage.
@@ -405,4 +460,111 @@ class PriceMonitor:
             "sources": self.source_chain.get_source_names(),
             "stats": self.source_chain.get_stats(),
             "circuit_breakers": self.source_chain.get_circuit_breaker_info(),
+        }
+
+    # ── M4: Model Training & Persistence ───────────────────────
+
+    def train_and_save_model(self, query_id: int) -> dict:
+        """Train a new model version for a query and persist it.
+
+        Called after data collection (manual or automatic). Builds training
+        data from historical prices, fits PricePredictorV3 online model,
+        evaluates with walk-forward backtest, and saves a new version.
+
+        Returns dict with version number, metrics, and status.
+        """
+        from core.predictor import PricePredictorV3
+        from core.price_prediction import HolidayManager
+
+        q = self.db.get_query(query_id)
+        if not q:
+            return {"error": "Query not found"}
+
+        # 1. Gather historical records for training
+        # CRITICAL: Use real-only data. Mock prices would pollute the labels
+        # and degrade model quality.
+        historical = self.db.get_daily_cheapest_records(
+            query_id=query_id, real_only=True, include_mock=False, limit=500,
+        )
+        if len(historical) < 10:
+            return {
+                "status": "insufficient_data",
+                "message": f"Need ≥10 records, got {len(historical)}. Collect more data first.",
+                "records_found": len(historical),
+            }
+
+        # 2. Build training records for predictor
+        holidays = HolidayManager.get_holidays(
+            datetime.strptime(q.departure_date, "%Y-%m-%d").year
+        )
+        holidays_list = [(s, e) for s, e, _ in holidays]
+
+        online_history = []
+        for h in historical:
+            online_history.append({
+                "price": float(h["price"]),
+                "date": h["date"],
+                "departure_time": h.get("departure_time", ""),
+                "sub_class": h.get("sub_class", ""),
+                "seat_inventory": int(h.get("seat_inventory", 9)),
+                "stops": int(h.get("stops", 0)),
+                "is_mock": h.get("source", "") not in ["ctrip_browser"],
+            })
+
+        # 3. Initialize predictor and train
+        predictor = PricePredictorV3()
+        X, y = predictor.build_training_data(
+            historical_records=online_history,
+            departure=q.departure,
+            destination=q.destination,
+            holidays=holidays_list,
+            departure_date=q.departure_date,
+        )
+
+        if not X or len(X) < 10:
+            return {
+                "status": "insufficient_data",
+                "message": f"Only {len(X)} training samples after feature extraction. Need ≥10.",
+            }
+
+        predictor.fit_online(X, y)
+
+        # 4. Evaluate with walk-forward backtest
+        backtest = predictor.backtest_walk_forward(
+            records=online_history,
+            departure_city=q.departure,
+            destination_city=q.destination,
+            holidays=holidays_list,
+            n_splits=min(5, len(online_history) // 10),
+            min_train_size=10,
+            purge_gap=1,
+            departure_date=q.departure_date,
+        )
+
+        metrics = {
+            "r2": backtest.get("r2", 0),
+            "rmse": backtest.get("rmse", 0),
+            "mae": backtest.get("mae", 0),
+            "mape": backtest.get("mape", 0),
+            "n_predictions": backtest.get("n_predictions", 0),
+        }
+
+        # 5. Save new version
+        version = self.model_store.save_version(
+            query_id=query_id,
+            predictor=predictor,
+            metrics=metrics,
+            description=f"Auto-trained on {len(online_history)} records",
+        )
+
+        logger.info(
+            f"Model trained & saved: query={query_id} v{version} "
+            f"(R²={metrics['r2']:.3f}, RMSE={metrics['rmse']:.0f})"
+        )
+
+        return {
+            "status": "ok",
+            "version": version,
+            "metrics": metrics,
+            "records_used": len(online_history),
         }
