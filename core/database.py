@@ -386,6 +386,35 @@ class Database:
             (query_id, limit)).fetchall()
         return [dict(r) for r in rows]
 
+    def get_daily_cheapest_records(self, query_id: int, real_only: bool = True,
+                                   include_mock: bool = False,
+                                   limit: int = 500) -> List[dict]:
+        """Get the exact cheapest price record per day with full metadata.
+
+        Public accessor for price_prediction.py and chart generators.
+        Each row includes: date, price, departure_time, sub_class,
+        seat_inventory, stops.
+        """
+        conn = self._get_conn()
+        source_cond = "AND source = 'ctrip_browser'" if real_only else ""
+        mock_cond = "" if include_mock else "AND is_mock = 0"
+        sql = f"""
+            SELECT pr.*, DATE(pr.recorded_at) as date
+            FROM price_records pr
+            INNER JOIN (
+                SELECT DATE(recorded_at) as date, MIN(price) as min_price
+                FROM price_records
+                WHERE query_id = ? {mock_cond} {source_cond}
+                GROUP BY DATE(recorded_at)
+            ) grouped
+            ON DATE(pr.recorded_at) = grouped.date
+               AND pr.price = grouped.min_price
+            WHERE pr.query_id = ? {mock_cond} {source_cond}
+            ORDER BY date ASC LIMIT ?
+        """
+        rows = conn.execute(sql, (query_id, query_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def get_all_prices_for_export(self, query_id: Optional[int] = None) -> List[dict]:
         conn = self._get_conn()
         if query_id is not None:
@@ -517,6 +546,9 @@ class Database:
             label=row["label"])
 
     def _row_to_price(self, row) -> FlightPrice:
+        # NOTE: `"col" in row` tests VALUES for sqlite3.Row, not column names.
+        # Always use `row.keys()` to check column existence.
+        keys = row.keys()
         return FlightPrice(
             id=row["id"], query_id=row["query_id"], airline=row["airline"],
             flight_no=row["flight_no"], aircraft=row["aircraft"],
@@ -525,10 +557,10 @@ class Database:
             duration=row["duration"], stops=row["stops"], price=row["price"],
             cabin_class=row["cabin_class"], source=row["source"],
             recorded_at=row["recorded_at"],
-            purchase_url=row["purchase_url"] if "purchase_url" in row else "",
-            sub_class=row["sub_class"] if "sub_class" in row else "",
-            seat_inventory=row["seat_inventory"] if "seat_inventory" in row else 9,
-            is_mock=bool(row["is_mock"]) if "is_mock" in row else False)
+            purchase_url=row["purchase_url"] if "purchase_url" in keys else "",
+            sub_class=row["sub_class"] if "sub_class" in keys else "",
+            seat_inventory=row["seat_inventory"] if "seat_inventory" in keys else 9,
+            is_mock=bool(row["is_mock"]) if "is_mock" in keys else False)
 
     def _row_to_alert(self, row) -> PriceAlert:
         return PriceAlert(

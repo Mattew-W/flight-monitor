@@ -74,7 +74,14 @@ class AsyncMultiPlatformScraper(AsyncBrowserScraperBase):
                 return []
 
             await page.wait_for_timeout(4000)
-            return self._sync_scraper._extract_prices(page, query)
+            # Await content() to get HTML string, then parse via pure sync function.
+            # (sync scraper's _extract_prices can't handle async page object.)
+            try:
+                html = await page.content()
+            except Exception as e:
+                logger.warning(f"[{self.name}] content() failed: {e}")
+                html = ""
+            return self._sync_scraper._extract_prices_from_html(html, page.url, query)
         except Exception as e:
             logger.error(f"[{self.name}] scrape error: {e}")
             return []
@@ -128,16 +135,15 @@ class AsyncAirlineSnifferSource(AsyncBrowserScraperBase):
             return []
 
         page = None
-        all_json_responses = []
+        # Collect response objects; response.json() is async, so we must await
+        # them after navigation completes (can't await inside sync callback).
+        _captured_responses = []
 
         def capture_json(response):
             if response.status == 200:
                 ct = response.headers.get("content-type", "")
                 if "json" in ct or "javascript" in ct:
-                    try:
-                        all_json_responses.append(response.json())
-                    except Exception:
-                        pass
+                    _captured_responses.append(response)
 
         try:
             page = await ctx.new_page()
@@ -156,6 +162,14 @@ class AsyncAirlineSnifferSource(AsyncBrowserScraperBase):
                 except Exception:
                     pass
             await pool.release()
+
+        # Await all captured responses to get JSON data
+        all_json_responses = []
+        for resp in _captured_responses:
+            try:
+                all_json_responses.append(await resp.json())
+            except Exception:
+                pass
 
         # Parse captured JSON (sync CPU work, no need for thread)
         results = []

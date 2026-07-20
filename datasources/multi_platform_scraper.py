@@ -12,6 +12,7 @@ from urllib.parse import quote, urlencode
 from .base import BaseDataSource
 from core.models import FlightPrice, SearchQuery
 from core.browser_pool import get_browser_pool
+from datasources.flight_schedules import lookup_flight_schedule, get_aircraft_for_flight
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,13 @@ PLATFORM_URL_BUILDERS = {
 
 # ── Multi-Platform Scraper ─────────────────────────────────────
 
-class MultiPlatformScraper:
+class MultiPlatformScraper(BaseDataSource):
     """Scrape prices from multiple platforms using shared browser."""
 
+    name: str = "multi_platform"
+
     def __init__(self, platform: str):
+        super().__init__()
         self.platform = platform
         self.url_builder = PLATFORM_URL_BUILDERS.get(platform)
         if not self.url_builder:
@@ -97,7 +101,9 @@ class MultiPlatformScraper:
                 return []
             page.wait_for_timeout(4000)  # let dynamic content load
 
-            return self._extract_prices(page, query)
+            # Extract HTML first, then parse in a pure sync function.
+            html = page.content() if hasattr(page, 'content') else ""
+            return self._extract_prices_from_html(html, page.url, query)
         except Exception as e:
             logger.error(f"[{self.platform}] scrape error: {e}")
             return []
@@ -107,12 +113,15 @@ class MultiPlatformScraper:
                 except Exception: pass
             pool.release()
 
-    def _extract_prices(self, page, query: SearchQuery) -> List[FlightPrice]:
-        """Try multiple strategies to extract prices from the rendered page."""
+    def _extract_prices_from_html(self, html: str, page_url: str, query: SearchQuery) -> List[FlightPrice]:
+        """Try multiple strategies to extract prices from rendered HTML.
+
+        Pure sync parsing: accepts HTML string (not page object) so it can be
+        called from both sync and async contexts.
+        """
         results = []
         try:
             # Strategy 1: Find any element with flight + price pattern in HTML
-            html = page.content()
             # Generic regex: flight number (2 letters + 2-4 digits) + price (¥xxx)
             pattern = re.compile(
                 r'([A-Z]{2}\d{2,4})[^¥]{0,80}?¥\s*(\d{3,6})',
@@ -129,22 +138,24 @@ class MultiPlatformScraper:
                     price = float(price_str)
                     if price < 100 or price > 99999:
                         continue
+                    # Lookup static schedule to fill missing fields
+                    sched = lookup_flight_schedule(flight_no)
                     results.append(FlightPrice(
                         query_id=query.id or 0,
-                        airline="",
+                        airline=sched.get("airline", "") if sched else "",
                         flight_no=flight_no,
-                        aircraft="",
-                        departure_time="",
-                        arrival_time="",
-                        departure_airport=query.departure,
-                        arrival_airport=query.destination,
-                        duration="",
+                        aircraft=sched.get("aircraft", "") if sched else "",
+                        departure_time=sched.get("dep", "") if sched else "",
+                        arrival_time=sched.get("arr", "") if sched else "",
+                        departure_airport=sched.get("dep_airport", query.departure) if sched else query.departure,
+                        arrival_airport=sched.get("arr_airport", query.destination) if sched else query.destination,
+                        duration=f"{sched['duration_min'] // 60}h{sched['duration_min'] % 60}m" if sched else "",
                         stops=0,
                         price=price,
                         cabin_class=query.cabin_class or "economy",
                         source=self.platform,
                         recorded_at=datetime.now().isoformat(),
-                        purchase_url=page.url,
+                        purchase_url=page_url,
                         is_mock=False,
                         sub_class="Y",
                         seat_inventory=0,
