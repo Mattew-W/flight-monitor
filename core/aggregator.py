@@ -5,8 +5,7 @@ Handles O(N) high-performance grouping, deduplication, and cross-platform price 
 from collections import defaultdict
 from typing import List, Dict, Any
 from core.models import FlightPrice, SearchQuery
-from datasources.flight_schedules import lookup_flight_schedule, get_aircraft_for_flight
-from datasources.mock_source import is_international_route
+from core.services import FlightScheduleService, RouteService
 from config import PURCHASE_PLATFORMS
 import logging
 
@@ -100,7 +99,7 @@ class FlightAggregator:
     def _get_platform_keys(departure: str, destination: str) -> list:
         """Determine route type and return target platform keys."""
         try:
-            intl = is_international_route(departure, destination)
+            intl = RouteService.is_international(departure, destination)
         except Exception:
             intl = False
         return INTL_PLATFORMS if intl else DOM_PLATFORMS
@@ -109,14 +108,14 @@ class FlightAggregator:
     def _backfill_flight_data(flight: FlightPrice) -> None:
         """Backfill missing flight data from schedule lookup."""
         if not flight.departure_time:
-            sched = lookup_flight_schedule(flight.flight_no)
+            sched = FlightScheduleService.lookup(flight.flight_no)
             if sched:
                 flight.departure_time = sched["dep"]
                 flight.arrival_time = sched["arr"]
                 flight.duration = f"{sched['duration_min'] // 60}h{sched['duration_min'] % 60}m"
                 flight.aircraft = flight.aircraft or sched.get("aircraft", "")
             else:
-                flight.aircraft = flight.aircraft or get_aircraft_for_flight(flight.flight_no)
+                flight.aircraft = flight.aircraft or FlightScheduleService.get_aircraft(flight.flight_no)
         if not flight.duration and flight.departure_time and flight.arrival_time:
             flight.duration = FlightAggregator._calc_duration(flight.departure_time, flight.arrival_time)
 
@@ -267,7 +266,7 @@ class FlightAggregator:
             FlightAggregator._backfill_flight_data(p)
         for p in mock_flights:
             FlightAggregator._backfill_flight_data(p)
-            p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
+            p.aircraft = p.aircraft or FlightScheduleService.get_aircraft(p.flight_no)
 
         # Aggregate all platforms from real data
         seen_platforms = defaultdict(set)
