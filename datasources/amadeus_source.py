@@ -10,7 +10,7 @@ import random
 from datetime import datetime
 from typing import List, Optional
 
-from .base import BaseDataSource
+from .base import BaseDataSource, register_source
 from core.models import FlightPrice, SearchQuery
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ CITY_IATA = {
 }
 
 
+@register_source("amadeus")
 class AmadeusSource(BaseDataSource):
     """Amadeus flight data via official API (free tier).
 
@@ -109,27 +110,31 @@ class AmadeusSource(BaseDataSource):
         results = []
         now = datetime.now().isoformat()
         for offer in offers:
-            itinerary = offer.get("itineraries", [{}])[0]
-            segments = itinerary.get("segments", [{}])
-            first_seg = segments[0]
-            last_seg = segments[-1]
-            price_data = offer.get("price", {})
-            total = float(price_data.get("grandTotal", 0))
+            try:
+                itinerary = offer.get("itineraries", [{}])[0]
+                segments = itinerary.get("segments", [{}])
+                first_seg = segments[0]
+                last_seg = segments[-1]
+                price_data = offer.get("price", {})
+                total = float(price_data.get("grandTotal", 0)) if price_data.get("grandTotal") is not None else 0
 
-            if total <= 0:
+                if total <= 0:
+                    continue
+
+                airline = first_seg.get("carrierCode", "")
+                flight_no = f"{airline}{first_seg.get('number', '')}"
+                dep_time = first_seg.get("departure", {}).get("at", "")
+                arr_time = last_seg.get("arrival", {}).get("at", "")
+
+                if dep_time and "T" in dep_time:
+                    dep_time = dep_time.split("T")[-1][:5]
+                if arr_time and "T" in arr_time:
+                    arr_time = arr_time.split("T")[-1][:5]
+
+                stops = len(segments) - 1
+            except (IndexError, TypeError, ValueError) as e:
+                logger.debug(f"[amadeus] Skipping malformed offer: {e}")
                 continue
-
-            airline = first_seg.get("carrierCode", "")
-            flight_no = f"{airline}{first_seg.get('number', '')}"
-            dep_time = first_seg.get("departure", {}).get("at", "")
-            arr_time = last_seg.get("arrival", {}).get("at", "")
-
-            if dep_time and "T" in dep_time:
-                dep_time = dep_time.split("T")[-1][:5]
-            if arr_time and "T" in arr_time:
-                arr_time = arr_time.split("T")[-1][:5]
-
-            stops = len(segments) - 1
 
             results.append(FlightPrice(
                 query_id=query.id or 0,

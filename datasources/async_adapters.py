@@ -167,9 +167,12 @@ class AsyncAirlineSnifferSource(AsyncBrowserScraperBase):
             if flight_list:
                 for item in flight_list:
                     if isinstance(item, dict):
-                        flight = _normalize_flight(item, query, self.name)
-                        if flight:
-                            results.append(flight)
+                        try:
+                            flight = _normalize_flight(item, query, self.name)
+                            if flight:
+                                results.append(flight)
+                        except Exception:
+                            pass  # skip malformed items
 
         return results
 

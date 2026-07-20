@@ -192,19 +192,22 @@ def _normalize_flight(item: dict, query: SearchQuery, source: str) -> Optional[F
     price = _extract_price(item)
     if price <= 0:
         return None
-    
-    return FlightPrice(
-        query_id=query.id or 0,
-        airline=_extract_field(item, FLIGHT_FIELD_PATTERNS["airline_fields"]) or fn[:2],
-        flight_no=fn,
-        aircraft=_extract_field(item, ["aircraftType", "craftType", "planeType", "equipment"]),
-        departure_time=_extract_field(item, FLIGHT_FIELD_PATTERNS["time_fields"][:3]),
-        arrival_time=_extract_field(item, FLIGHT_FIELD_PATTERNS["time_fields"][3:]),
-        departure_airport=_extract_field(item, ["depAirport", "depPort", "departureAirport", "fromAirport"]),
-        arrival_airport=_extract_field(item, ["arrAirport", "arrPort", "arrivalAirport", "toAirport"]),
-        duration=_extract_field(item, ["duration", "flyTime", "travelTime"]),
-        stops=int(_extract_field(item, ["stopCount", "stops", "transferCount"]) or 0),
-        price=price,
+        try:
+            stops = int(_extract_field(item, ["stopCount", "stops", "transferCount"]) or 0)
+        except (ValueError, TypeError):
+            stops = 0
+        return FlightPrice(
+            query_id=query.id or 0,
+            airline=_extract_field(item, FLIGHT_FIELD_PATTERNS["airline_fields"]) or fn[:2],
+            flight_no=fn,
+            aircraft=_extract_field(item, ["aircraftType", "craftType", "planeType", "equipment"]),
+            departure_time=_extract_field(item, FLIGHT_FIELD_PATTERNS["time_fields"][:3]),
+            arrival_time=_extract_field(item, FLIGHT_FIELD_PATTERNS["time_fields"][3:]),
+            departure_airport=_extract_field(item, ["depAirport", "depPort", "departureAirport", "fromAirport"]),
+            arrival_airport=_extract_field(item, ["arrAirport", "arrPort", "arrivalAirport", "toAirport"]),
+            duration=_extract_field(item, ["duration", "flyTime", "travelTime"]),
+            stops=stops,
+            price=price,
         cabin_class=query.cabin_class,
         source=source,
         recorded_at=now,

@@ -20,6 +20,7 @@ Usage:
 import json
 import logging
 import os
+import threading
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -34,10 +35,11 @@ class ConfigLoader:
         self._config_dir = config_dir or DEFAULT_CONFIG_DIR
         self._cache: Dict[str, Any] = {}
         self._loaded = False
+        self._lock = threading.Lock()
 
     def load(self) -> 'ConfigLoader':
-        """Load all JSON config files into memory."""
-        self._cache = {}
+        """Load all JSON config files into memory (thread-safe atomic swap)."""
+        new_cache: Dict[str, Any] = {}
         config_files = {
             "platforms": "platforms.json",
             "cities": "cities.json",
@@ -48,15 +50,17 @@ class ConfigLoader:
             filepath = os.path.join(self._config_dir, filename)
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
-                    self._cache[key] = json.load(f)
+                    new_cache[key] = json.load(f)
                 logger.debug(f"ConfigLoader: loaded {filename}")
             except FileNotFoundError:
                 logger.warning(f"ConfigLoader: {filename} not found at {filepath}")
-                self._cache[key] = {}
+                new_cache[key] = {}
             except json.JSONDecodeError as e:
                 logger.error(f"ConfigLoader: {filename} JSON error: {e}")
-                self._cache[key] = {}
-        self._build_derived()
+                new_cache[key] = {}
+        self._build_derived_into(new_cache)
+        with self._lock:
+            self._cache = new_cache
         self._loaded = True
         logger.info(f"ConfigLoader: all configs loaded from {self._config_dir}")
         return self
@@ -66,25 +70,25 @@ class ConfigLoader:
         logger.info("ConfigLoader: reloading all configs")
         return self.load()
 
-    def _build_derived(self):
+    def _build_derived_into(self, cache: dict):
         """Build derived/computed config values."""
-        city_groups = self._cache.get("cities", {}).get("city_groups", {})
+        city_groups = cache.get("cities", {}).get("city_groups", {})
         city_to_region = {}
         for region, cities in city_groups.items():
             for city in cities:
                 city_to_region[city] = region
-        self._cache["city_to_region"] = city_to_region
+        cache["city_to_region"] = city_to_region
 
-        airlines_data = self._cache.get("airlines", {})
+        airlines_data = cache.get("airlines", {})
         domestic = airlines_data.get("domestic_airlines", [])
         international = airlines_data.get("international_airlines", [])
-        self._cache["all_airlines"] = domestic + international
+        cache["all_airlines"] = domestic + international
 
         aircraft = airlines_data.get("aircraft_types", {})
         all_aircraft = []
         for category in aircraft.values():
             all_aircraft.extend(category)
-        self._cache["all_aircraft"] = all_aircraft
+        cache["all_aircraft"] = all_aircraft
 
     @property
     def platforms(self) -> Dict[str, Any]:

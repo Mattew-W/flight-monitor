@@ -104,7 +104,7 @@ def _check_api_key():
     # Set FLIGHT_MONITOR_API_KEY to enable write-protection.
     if not API_KEY:
         return None
-    provided = request.headers.get("X-API-Key") or request.args.get("api_key", "")
+    provided = request.headers.get("X-API-Key", "")
     if provided == API_KEY:
         return None
     return jsonify({"error": "invalid or missing API key"}), 401
@@ -183,7 +183,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             # No key configured — keep backwards-compatible open behavior.
             return None
         # Use constant-time comparison to avoid timing attacks.
-        provided = request.headers.get("X-API-Key") or request.args.get("api_key", "")
+        provided = request.headers.get("X-API-Key", "")
         if not provided or not hmac.compare_digest(provided, API_KEY):
             return jsonify({"error": "invalid or missing API key"}), 401
         return None

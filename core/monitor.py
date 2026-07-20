@@ -309,9 +309,20 @@ class PriceMonitor:
         logger.info("Price monitor stopped")
 
     def _run_loop(self):
+        prune_counter = 0
         while not self._stop_event.is_set():
             try:
                 self._check_all_concurrent()
+                # Prune expired price records every ~6 hours (72 cycles at 5-min).
+                prune_counter += 1
+                if prune_counter >= 72:
+                    try:
+                        deleted = self.db.prune_expired_records(days_old=45)
+                        if deleted > 0:
+                            logger.info(f"Pruned {deleted} expired price records")
+                    except Exception as e:
+                        logger.warning(f"prune_expired_records error: {e}")
+                    prune_counter = 0
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")
             self._stop_event.wait(timeout=self.interval)
@@ -515,7 +526,7 @@ class PriceMonitor:
                 "sub_class": h.get("sub_class", ""),
                 "seat_inventory": int(h.get("seat_inventory", 9)),
                 "stops": int(h.get("stops", 0)),
-                "is_mock": h.get("source", "") not in ["ctrip_browser"],
+                "is_mock": bool(h.get("is_mock", 0)),
             })
 
         # 3. Initialize predictor and train
@@ -555,6 +566,14 @@ class PriceMonitor:
             "mape": backtest.get("mape", 0),
             "n_predictions": backtest.get("n_predictions", 0),
         }
+
+        # Don't save versions with no valid backtest (e.g. n<20 samples).
+        if backtest.get("error") or backtest.get("n_predictions", 0) == 0:
+            return {
+                "status": "validation_failed",
+                "message": backtest.get("error", "Backtest produced no valid predictions"),
+                "records_used": len(online_history),
+            }
 
         # 5. Save new version
         version = self.model_store.save_version(

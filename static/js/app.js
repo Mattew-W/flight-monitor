@@ -157,10 +157,10 @@ function setupKeyboardNav() {
             }
         });
     });
-    // Close modal on Escape
+    // Close modal on Escape  
     document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") {
-            document.querySelectorAll(".modal").forEach(m => m.style.display = "none");
+            document.querySelectorAll(".modal").forEach(m => closeModal(m.id));
             // Also close mobile menu
             document.getElementById("sidebar").classList.remove("open");
             document.getElementById("sidebarOverlay").classList.remove("show");
@@ -170,7 +170,7 @@ function setupKeyboardNav() {
     // Click outside modal to close
     document.querySelectorAll(".modal").forEach(modal => {
         modal.addEventListener("click", (e) => {
-            if (e.target === modal) modal.style.display = "none";
+            if (e.target === modal) closeModal(modal.id);
         });
     });
 }
@@ -219,7 +219,15 @@ async function api(url, method = "GET", body = null) {
         opts.body = JSON.stringify(body);
     }
     const resp = await fetch(url, opts);
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    if (!resp.ok) {
+        // Include backend error detail if available (e.g. validation messages).
+        let detail = "";
+        try {
+            const errData = await resp.json();
+            detail = errData.error || "";
+        } catch (_) { /* ignore parse failures */ }
+        throw new Error(detail || `API error: ${resp.status}`);
+    }
     return resp.json();
 }
 
@@ -2339,7 +2347,9 @@ function setupFilterBar() {
         const input = document.getElementById(id);
         if (input) {
             input.addEventListener("input", () => {
-                searchFilters.priceMin = parseFloat(input.value) || null;
+                const val = parseFloat(input.value) || null;
+                if (id === "filterPriceMin") searchFilters.priceMin = val;
+                else searchFilters.priceMax = val;
             });
             input.addEventListener("change", () => {
                 searchFilters.priceMax = parseFloat(document.getElementById("filterPriceMax").value) || null;

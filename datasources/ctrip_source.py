@@ -46,9 +46,18 @@ class CtripDataSource(BaseDataSource):
             return []
 
         try:
-            # Try the lowest price API first
-            url = f"{CTRIP_API_URL}?flightWay=Oneway&dcity={dep_code}&acity={arr_code}&direct=true"
+            # Try the lowest price API with departure date
+            url = (f"{CTRIP_API_URL}?flightWay=Oneway&dcity={dep_code}&acity={arr_code}"
+                   f"&direct=true&ddate={query.departure_date}")
             resp = self._requests.get(url, headers=CTRIP_HEADERS, timeout=10)
+
+            if resp.status_code in (403, 432):
+                logger.warning(
+                    f"Ctrip blocked request (status={resp.status_code}) "
+                    f"for {query.departure}->{query.destination}: possible anti-bot"
+                )
+                return []
+
             resp.raise_for_status()
             data = resp.json()
 
