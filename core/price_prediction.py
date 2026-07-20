@@ -21,6 +21,12 @@ from typing import List, Dict, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _stable_seed(*parts):
+    """Stable integer seed from string parts (md5, not Python's randomized hash)."""
+    raw = "|".join(str(p) for p in parts)
+    return int(hashlib.md5(raw.encode("utf-8")).hexdigest()[:8], 16)
+
 # ── New predictor (v3) ────────────────────────────────────
 from .predictor import PricePredictorV3, extract_features
 
@@ -196,29 +202,16 @@ def get_historical_prices(db, query_id: int, days_back: int = 30,
                           include_mock: bool = False) -> List[Dict]:
     """Get rich historical price records for ML modeling or chart display.
 
-    Uses direct SQL subquery to locate the *exact* lowest-price record
-    per day — preserving flight-level metadata.
+    Uses the public database accessor get_daily_cheapest_records() to
+    preserve flight-level metadata (departure_time, sub_class, etc.).
     """
     try:
-        conn = db._get_conn()
-        source_cond = "AND source = 'ctrip_browser'" if real_only else ""
-        mock_cond = "" if include_mock else "AND is_mock = 0"
-        sql = f"""
-            SELECT pr.*, DATE(pr.recorded_at) as date
-            FROM price_records pr
-            INNER JOIN (
-                SELECT DATE(recorded_at) as date, MIN(price) as min_price
-                FROM price_records
-                WHERE query_id = ? {mock_cond} {source_cond}
-                GROUP BY DATE(recorded_at)
-            ) grouped
-            ON DATE(pr.recorded_at) = grouped.date
-               AND pr.price = grouped.min_price
-            WHERE pr.query_id = ? {mock_cond} {source_cond}
-            ORDER BY date ASC
-        """
-        rows = conn.execute(sql, (query_id, query_id)).fetchall()
-
+        rows = db.get_daily_cheapest_records(
+            query_id=query_id,
+            real_only=real_only,
+            include_mock=include_mock,
+            limit=500,
+        )
         if not rows:
             return []
 
@@ -231,10 +224,10 @@ def get_historical_prices(db, query_id: int, days_back: int = 30,
                     "price": float(r["price"]),
                     "min_price": float(r["price"]),
                     "avg_price": float(r["price"]),
-                    "departure_time": (r["departure_time"] or ""),
-                    "sub_class": (r["sub_class"] if "sub_class" in r.keys() else ""),
-                    "seat_inventory": int(r["seat_inventory"]) if "seat_inventory" in r.keys() else 9,
-                    "stops": int(r["stops"]) if "stops" in r.keys() else 0,
+                    "departure_time": (r.get("departure_time") or ""),
+                    "sub_class": (r.get("sub_class", "")),
+                    "seat_inventory": int(r.get("seat_inventory", 9)),
+                    "stops": int(r.get("stops", 0)),
                 }
         return sorted(by_date.values(), key=lambda x: x["date"])
     except Exception as e:
@@ -368,15 +361,14 @@ def _generate_with_v3(
         holidays=holidays,
     )
 
-    # predict() returns a scalar forecast. Build a list for the chart:
-    # apply days-to-departure modifier to create a forward curve
+    # The predict() function already applies _days_to_departure_modifier internally
+    # to base_price. We must NOT apply it again (double-counting caused extreme
+    # 37%+ price inflation near departure). Instead we build a gentle curve:
+    # for each future day we compute the *relative* modifier change from today's
+    # value and apply it as a small adjustment factor around 1.0.
     base_price = result["forecast"]
     base_lower = result["lower_ci"]
     base_upper = result["upper_ci"]
-
-    # Normalize: the predictor's forecast is for today's modifier.
-    # We build a curve by applying the relative modifier for each future day.
-    mod_today = predictor._days_to_departure_modifier(days_until_departure)
 
     forecast = []
     lower_ci = []
@@ -384,12 +376,18 @@ def _generate_with_v3(
     for d in range(1, days_until_departure + 1):
         days_left = days_until_departure - d + 1
         mod_future = predictor._days_to_departure_modifier(days_left)
-        # ratio > 1 when future day is closer to departure (price rises)
-        # ratio < 1 when future day is farther out (price drops)
+        mod_today = predictor._days_to_departure_modifier(days_until_departure)
+        # mod_future / mod_today shows how much the curve bends.
+        # Without the internal predict() application, this ratio IS the price curve.
+        # Since predict() already applied mod_today, we need DIFF from that baseline:
+        # a ratio of 1.0 means price unchanged, >1.0 means higher, <1.0 means lower.
+        # Clamp to avoid extreme swings (data noise shouldn't override model).
         ratio = mod_future / max(mod_today, 0.01)
+        ratio = max(0.85, min(1.15, ratio))  # clamp within ±15%
         forecast.append(round(base_price * ratio))
-        # CI widens as we look further into the future
-        ci_expansion = 1.0 + (d / max(days_until_departure, 1))
+        # Symmetric CI: expand both bands by sqrt(ci_expansion) (avoids the old
+        # problem where lower shrank toward 0 while upper ballooned).
+        ci_expansion = math.sqrt(1.0 + (d / max(days_until_departure, 1)))
         lower_ci.append(round(base_lower * ratio / ci_expansion))
         upper_ci.append(round(base_upper * ratio * ci_expansion))
 
@@ -539,13 +537,15 @@ def _generate_with_v2(
     # Simple linear + seasonality forecast
     forecast = _simple_forecast(valid_prices, days_until_departure, profile)
 
-    # Confidence intervals
-    current = valid_prices[-1]
-    lower = [max(0, int(f * 0.8)) for f in forecast]
-    upper = [int(f * 1.2) for f in forecast]
-
+    # Confidence intervals — widen with forecast horizon
     future_dates = [(today + timedelta(days=i)).strftime("%Y-%m-%d")
                     for i in range(1, days_until_departure + 1)]
+    lower = []
+    upper = []
+    for i, f in enumerate(forecast):
+        ci_expansion = math.sqrt(1.0 + (i + 1) / max(days_until_departure, 1))
+        lower.append(max(0, round(f * 0.8 / ci_expansion)))
+        upper.append(round(f * 1.2 * ci_expansion))
 
     predicted_min = min(forecast) if forecast else current_price
     predicted_max = max(forecast) if forecast else current_price
@@ -676,6 +676,64 @@ def _simple_forecast(prices: List[float], days_ahead: int, profile: str) -> List
         forecast.append(max(0, round(base)))
 
     return forecast
+
+
+def _compute_residual_std(ys: List[float], slope: float, intercept: float) -> float:
+    """Compute standard deviation of residuals from a linear fit."""
+    if len(ys) < 2:
+        return 1.0  # min clamp
+    residuals = []
+    for i, y in enumerate(ys):
+        predicted = slope * i + intercept
+        residuals.append(y - predicted)
+    mean_sq = sum(r * r for r in residuals) / len(residuals)
+    return max(math.sqrt(mean_sq), 1.0)  # min clamp to 1.0
+
+
+def _wma_forecast(prices: List[float], days_ahead: int) -> Tuple[List[float], float]:
+    """Weighted moving average forecast."""
+    if not prices:
+        return [0.0] * days_ahead, 0.0
+    if len(prices) == 1:
+        return [prices[0]] * days_ahead, 0.0
+
+    # Weighted average with linearly increasing weights
+    n = len(prices)
+    weights = list(range(1, n + 1))
+    total_w = sum(weights)
+    wma = sum(p * w for p, w in zip(prices, weights)) / total_w
+
+    # Trend strength (0-1)
+    if n >= 2:
+        recent = prices[-3:]
+        if len(recent) >= 2:
+            diffs = [recent[i + 1] - recent[i] for i in range(len(recent) - 1)]
+            avg_diff = sum(diffs) / len(diffs)
+            strength = min(abs(avg_diff) / (wma + 1), 1.0)
+        else:
+            strength = 0.0
+    else:
+        strength = 0.0
+
+    # Project forward
+    forecast = []
+    for i in range(days_ahead):
+        forecast.append(wma)
+
+    return forecast, strength
+
+
+def _ci_bands(forecast: List[float], residual_std: float, current_price: float,
+              days_ahead: int) -> Tuple[List[float], List[float]]:
+    """Generate confidence interval bands that widen over time."""
+    lower = []
+    upper = []
+    for i, f in enumerate(forecast):
+        # Band width grows with sqrt of time
+        width = residual_std * math.sqrt(i + 1) * 1.96
+        lower.append(f - width)
+        upper.append(f + width)
+    return lower, upper
 
 
 def _linear_regression(xs: List[float], ys: List[float]) -> Tuple[float, float]:
@@ -815,8 +873,10 @@ def arima_forecast(prices: List[float], days_ahead: int) -> Dict:
     for d in range(1, days_ahead + 1):
         value = max(0, base + slope * d)
         forecast.append(round(value))
-        lower.append(round(value * 0.8))
-        upper.append(round(value * 1.2))
+        # CI widens with sqrt of time
+        ci_expansion = math.sqrt(1.0 + d / max(days_ahead, 1))
+        lower.append(max(0, round(value * 0.8 / ci_expansion)))
+        upper.append(round(value * 1.2 * ci_expansion))
 
     return {
         "forecast": forecast,
@@ -840,35 +900,39 @@ def data_driven_forecast(prices: List[float], days_ahead: int, profile: str) -> 
     log_prices = [math.log1p(max(p, 1)) for p in prices]
     slope, intercept = _linear_regression(xs, log_prices)
 
-    # Profile-specific modifiers
+    # Profile-specific modifiers (drift is daily log-return, noise is daily vol)
+    # Drift values are conservative to prevent exponential explosion
     profile_modifiers = {
-        "competitive": (0.0, -0.005, 0.15),   # (floor, drift, noise_mult)
-        "moderate": (0.0, 0.002, 0.10),
-        "monopoly": (0.0, 0.008, 0.08),
-        "budget": (0.0, -0.003, 0.20),
-        "holiday": (0.0, 0.015, 0.12),
-        "offpeak": (0.0, -0.002, 0.10),
+        "competitive": (0.0, -0.003, 0.08),   # (floor, drift, noise_mult)
+        "moderate": (0.0, 0.001, 0.06),
+        "monopoly": (0.0, 0.004, 0.06),
+        "budget": (0.0, -0.002, 0.10),
+        "holiday": (0.0, 0.006, 0.08),
+        "offpeak": (0.0, -0.001, 0.06),
     }
-    floor, drift, noise = profile_modifiers.get(profile, (0.0, 0.0, 0.10))
+    floor, drift, noise = profile_modifiers.get(profile, (0.0, 0.0, 0.08))
 
     # Generate future log prices
-    rng = random.Random(hash(f"{profile}_{prices[-1]}_{n}") % (2**31))
+    # Use _stable_seed (md5-based) instead of built-in hash() which is
+    # randomized per process — otherwise same input gives different forecasts.
+    rng = random.Random(_stable_seed(profile, prices[-1], n))
     forecast = []
+    median_price = statistics.median(prices)
     for d in range(1, days_ahead + 1):
         log_val = intercept + slope * (n - 1 + d) + drift * d
         jitter = rng.gauss(0, noise)
         predicted = max(0, math.exp(log_val + jitter))
+        # Clip each point to prevent exponential explosion
+        predicted = max(median_price * 0.4, min(median_price * 2.0, predicted))
         forecast.append(round(predicted))
 
-    # Clip to reasonable bounds
-    if forecast:
-        p_min = min(forecast)
-        p_max = max(forecast)
-        median_price = statistics.median(prices)
-        forecast = [max(median_price * 0.3, min(median_price * 3.0, f)) for f in forecast]
-
-    lower = [round(f * 0.85) for f in forecast]
-    upper = [round(f * 1.15) for f in forecast]
+    # CI bands widen with forecast horizon (symmetric, gentle expansion)
+    lower = []
+    upper = []
+    for i, f in enumerate(forecast):
+        ci_expansion = 1.0 + 0.15 * math.sqrt(1.0 + (i + 1) / max(days_ahead, 1))
+        lower.append(max(0, round(f / ci_expansion)))
+        upper.append(round(f * ci_expansion))
 
     return {
         "forecast": forecast,

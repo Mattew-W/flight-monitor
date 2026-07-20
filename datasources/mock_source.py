@@ -8,9 +8,10 @@ Prices fluctuate over time to simulate real market behavior.
 """
 import random
 import hashlib
+import math
 from datetime import datetime, timedelta
 from typing import List
-from .base import BaseDataSource
+from .base import BaseDataSource, register_source
 from core.models import FlightPrice, SearchQuery
 from config import (
     AIRLINES, AIRCRAFT_TYPES, CITY_CODES,
@@ -335,6 +336,7 @@ def build_purchase_url(platform_key: str, departure: str, destination: str,
         return plat["url"]
 
 
+@register_source("mock")
 class MockDataSource(BaseDataSource):
     """Simulated multi-platform flight data source with realistic price behavior.
     Supports both domestic (China) and international routes."""
@@ -346,9 +348,16 @@ class MockDataSource(BaseDataSource):
         intl = is_international_route(query.departure, query.destination)
         base_price = get_route_base_price(query.departure, query.destination)
 
-        # Deterministic seed based on route+date
+        # Deterministic seed based on route+date only.
+        # NOTE: previously mixed in random.randint(0,9999) which made the same
+        # route+date produce different prices every call — polluting price history.
         seed_str = f"{query.departure}{query.destination}{query.departure_date}"
         seed_base = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
+
+        # Daily random generator: re-shuffles airline/platform discounts each day
+        # Uses departure_date as seed so different dates get different "winners"
+        daily_seed = int(hashlib.md5(query.departure_date.encode()).hexdigest()[:8], 16)
+        daily_rng = random.Random(daily_seed)
 
         # Time-based fluctuation
         now = datetime.now()
@@ -375,6 +384,14 @@ class MockDataSource(BaseDataSource):
             day_factor = 1.25
         else:
             day_factor = 1.40
+
+        # Daily market fluctuation: sinusoidal pattern with 30-day period
+        try:
+            dep_date = datetime.strptime(query.departure_date, "%Y-%m-%d")
+            day_of_year = dep_date.timetuple().tm_yday
+            daily_fluctuation = 1 + 0.15 * math.sin(day_of_year * 2 * math.pi / 30)
+        except (ValueError, AttributeError):
+            daily_fluctuation = 1.0
 
         # Cabin class multiplier
         cabin_mult = {"economy": 1.0, "business": 2.8, "first": 4.5}.get(
@@ -441,11 +458,18 @@ class MockDataSource(BaseDataSource):
             dep_minute = rng.choice([0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55])
             dep_time = f"{dep_hour:02d}:{dep_minute:02d}"
 
-            # Price variation: wider range for realistic spread
+            # Price variation: wider range for realistic spread (0.50-1.60)
             # Budget airlines are 20-40% cheaper; peak hours cost more
-            price_variation = rng.uniform(0.70, 1.30)
-            if airline in BUDGET_AIRLINES:
-                price_variation *= rng.uniform(0.65, 0.80)
+            price_variation = rng.uniform(0.50, 1.60)
+            # Add Gaussian noise for realistic market randomness
+            price_variation *= (1 + rng.gauss(0, 0.08))
+
+            # Daily randomized airline discount: each day different airlines
+            # get different discount factors, so the cheapest airline varies
+            # Get a daily-unique discount for this airline (0.65 - 1.05 range)
+            airline_daily_discount = daily_rng.uniform(0.65, 1.05)
+            price_variation *= airline_daily_discount
+
             # Peak hours (morning 7-9, evening 17-20) cost more
             if 7 <= dep_hour <= 9 or 17 <= dep_hour <= 20:
                 price_variation *= rng.uniform(1.05, 1.20)
@@ -453,7 +477,7 @@ class MockDataSource(BaseDataSource):
             if dep_hour < 7:
                 price_variation *= rng.uniform(0.80, 0.90)
 
-            base_flight_price = base_price * day_factor * price_variation * cabin_mult
+            base_flight_price = base_price * day_factor * daily_fluctuation * price_variation * cabin_mult
             base_flight_price = round(base_flight_price / 10) * 10
             base_flight_price = max(120 if not intl else 300, base_flight_price)
 
@@ -502,23 +526,11 @@ class MockDataSource(BaseDataSource):
                 plat_rng = random.Random(flight_seed + plat_seed_val)
                 # Wide platform price variation: 72%-135% of base (realistic spread)
                 plat_factor = plat_rng.uniform(0.72, 1.35)
-                # Some platforms consistently cheaper, others premium
-                if plat_key == "qunar":
-                    plat_factor *= plat_rng.uniform(0.85, 0.98)  # Cheaper
-                elif plat_key == "fliggy":
-                    plat_factor *= plat_rng.uniform(0.88, 1.05)
-                elif plat_key == "ctrip":
-                    plat_factor *= plat_rng.uniform(0.92, 1.08)
-                elif plat_key == "tongcheng":
-                    plat_factor *= plat_rng.uniform(0.87, 1.03)
-                elif plat_key == "skyscanner":
-                    plat_factor *= plat_rng.uniform(0.82, 1.02)  # Aggregator
-                elif plat_key == "kayak":
-                    plat_factor *= plat_rng.uniform(0.85, 1.00)
-                elif plat_key == "googleflights":
-                    plat_factor *= plat_rng.uniform(0.90, 1.05)
-                elif plat_key == "tripcom":
-                    plat_factor *= plat_rng.uniform(0.88, 1.10)
+
+                # Daily randomized platform discount: each day different platforms
+                # get different discount factors, so the cheapest platform varies
+                plat_daily_discount = daily_rng.uniform(0.82, 1.08)
+                plat_factor *= plat_daily_discount
 
                 plat_price = round(base_flight_price * plat_factor / 10) * 10
                 plat_price = max(120 if not intl else 300, plat_price)

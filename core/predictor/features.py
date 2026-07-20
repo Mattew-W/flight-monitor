@@ -141,11 +141,13 @@ def compute_rolling_stats(prices: List[float]) -> Dict[str, float]:
     """Compute lagged statistical features from a price series.
 
     Features:
-      - rolling_mean_7d
-      - rolling_std_7d
+      - rolling_mean_7d / rolling_mean_3d
+      - rolling_std_7d / rolling_std_3d
       - momentum_3d (relative price change over last 3 days)
       - momentum_7d
       - volatility_7d (coefficient of variation)
+      - price_change_1d (1日价格变化率)
+      - price_change_3d (3日价格变化率)
     """
     if not prices:
         return {
@@ -154,6 +156,10 @@ def compute_rolling_stats(prices: List[float]) -> Dict[str, float]:
             "momentum_3d": 0,
             "momentum_7d": 0,
             "volatility_7d": 0,
+            "price_change_1d": 0,
+            "price_change_3d": 0,
+            "rolling_mean_3d": 0,
+            "rolling_std_3d": 0,
         }
 
     current = prices[-1]
@@ -163,6 +169,11 @@ def compute_rolling_stats(prices: List[float]) -> Dict[str, float]:
     rolling_mean_7 = statistics.mean(window_7)
     rolling_std_7 = statistics.stdev(window_7) if len(window_7) > 1 else 0
 
+    # 3-day rolling stats
+    window_3 = prices[-3:] if len(prices) >= 3 else prices
+    rolling_mean_3 = statistics.mean(window_3)
+    rolling_std_3 = statistics.stdev(window_3) if len(window_3) > 1 else 0
+
     # Momentum: relative change from past to now
     momentum_3d = 0.0
     if len(prices) >= 3 and prices[-3] > 0:
@@ -171,6 +182,15 @@ def compute_rolling_stats(prices: List[float]) -> Dict[str, float]:
     momentum_7d = 0.0
     if len(prices) >= 7 and prices[-7] > 0:
         momentum_7d = (current - prices[-7]) / prices[-7]
+
+    # Price change rates
+    price_change_1d = 0.0
+    if len(prices) >= 2 and prices[-2] > 0:
+        price_change_1d = (current - prices[-2]) / prices[-2]
+
+    price_change_3d = 0.0
+    if len(prices) >= 3 and prices[-3] > 0:
+        price_change_3d = (current - prices[-3]) / prices[-3]
 
     # Volatility as coefficient of variation
     volatility_7d = 0.0
@@ -183,6 +203,10 @@ def compute_rolling_stats(prices: List[float]) -> Dict[str, float]:
         "momentum_3d": momentum_3d,
         "momentum_7d": momentum_7d,
         "volatility_7d": volatility_7d,
+        "price_change_1d": price_change_1d,
+        "price_change_3d": price_change_3d,
+        "rolling_mean_3d": rolling_mean_3,
+        "rolling_std_3d": rolling_std_3,
     }
 
 
@@ -195,6 +219,7 @@ def extract_features(
     departure_date: str = "",
     holidays: List[Tuple[datetime, datetime]] = None,
     airline_prior: Dict = None,
+    time_index: float = 0.0,
 ) -> Dict[str, float]:
     """Extract a complete feature vector for price prediction.
 
@@ -216,6 +241,9 @@ def extract_features(
     """
     if not records or not any(r.get("price", 0) > 0 for r in records):
         return _empty_feature_vector()
+
+    # Normalize optional list params early (before any iteration).
+    holidays = holidays or []
 
     from .distance import get_distance_with_fallback
 
@@ -246,6 +274,26 @@ def extract_features(
     rolling = compute_rolling_stats(prices)
     features.update(rolling)
 
+    # ── 3b. New engineered features ──
+    # 距起飞天数的平方（捕捉非线性效应）
+    features["days_until_departure_sq"] = float(days_until_departure ** 2)
+
+    # 是否周末（周五/周六）
+    features["is_weekend"] = 1.0 if dep_date.weekday() in (4, 5) else 0.0
+
+    # 是否节假日期间（严格在节假日范围内）
+    features["is_holiday_period"] = 0.0
+    for h_start, h_end in holidays:
+        if h_start <= dep_date <= h_end:
+            features["is_holiday_period"] = 1.0
+            break
+
+    # 价格动量（当前价 / 7日均价 - 1）
+    if rolling.get("rolling_mean_7d", 0) > 0:
+        features["price_momentum"] = current_price / rolling["rolling_mean_7d"] - 1.0
+    else:
+        features["price_momentum"] = 0.0
+
     # ── 4. Cyclical time encodings ──
     dep_time_str = latest.get("departure_time", "") or ""
     time_sin, time_cos = cyclical_time_encoding(dep_time_str)
@@ -263,7 +311,6 @@ def extract_features(
     features["dow_cos"] = dow_cos
 
     # ── 5. Holiday proximity ──
-    holidays = holidays or []
     features["holiday_proximity"] = holiday_proximity_score(dep_date, holidays)
     features["is_peak_season"] = 1.0 if dep_date.month in PEAK_MONTHS else (0.5 if dep_date.month in SHOULDER_MONTHS else 0.0)
 
@@ -318,7 +365,11 @@ def extract_features(
     # Hub-to-hub routes have higher base fares due to market power.
     features["hub_premium"] = 1.0 if (departure_city in HUB_CITIES and destination_city in HUB_CITIES) else 0.0
 
-    # ── 14. Real fuel price interaction (PDF §3.2) ──
+    # ── 14. Time index (for trend learning) ──
+    # Allows model to learn long-term trends in the data
+    features["time_index"] = time_index
+
+    # ── 15. Real fuel price interaction (PDF §3.2) ──
     # City + duration based: fuel price varies by region and flight length
     try:
         from .fuel_data import FuelPriceProvider
@@ -359,6 +410,14 @@ def _get_feature_names() -> List[str]:
         "momentum_3d",
         "momentum_7d",
         "volatility_7d",
+        "price_change_1d",
+        "price_change_3d",
+        "rolling_mean_3d",
+        "rolling_std_3d",
+        "days_until_departure_sq",
+        "is_weekend",
+        "is_holiday_period",
+        "price_momentum",
         "dep_time_sin",
         "dep_time_cos",
         "month_sin",
@@ -381,6 +440,7 @@ def _get_feature_names() -> List[str]:
         "time_slot",
         "regime",
         "hub_premium",
+        "time_index",
         "fuel_interaction_30d",
         "fuel_interaction_90d",
     ]
@@ -441,41 +501,6 @@ def _encode_regime(date: datetime) -> float:
 
 
 def _parse_stops(stops_val) -> int:
-    """Parse various stop count formats to integer."""
-    if stops_val is None:
-        return 0
-    if isinstance(stops_val, int):
-        return stops_val
-    s = str(stops_val).lower()
-    if "non-stop" in s or s in ("0", "none"):
-        return 0
-    import re
-    m = re.search(r"(\d+)", s)
-    return int(m.group(1)) if m else 0
-
-
-def _parse_duration_minutes(dur_str: str) -> int:
-    """Parse duration string like '2h 50m' to minutes. Returns 0 on error."""
-    if not dur_str:
-        return 0
-    import re
-    m = re.match(r"^(\d+)h\s*(\d+)m", dur_str.strip())
-    if m:
-        return int(m.group(1)) * 60 + int(m.group(2))
-    m = re.match(r"^(\d+)h$", dur_str.strip())
-    if m:
-        return int(m.group(1)) * 60
-    return 0
-
-
-def _encode_subclass(sc: str) -> float:
-    """Map fare class code to discount weight."""
-    if not sc:
-        return 0.7
-    sc = sc.strip().upper()
-    if sc in SUBCLASS_WEIGHT:
-        return SUBCLASS_WEIGHT[sc]
-    return 0.7
     """Parse various stop count formats to integer."""
     if stops_val is None:
         return 0

@@ -3,6 +3,7 @@ Flight Monitor - Shared Browser Pool (v4 — Async)
 Single Chromium process, per-platform context isolation.
 All I/O is async — one event loop drives N concurrent searches.
 """
+from __future__ import annotations
 import asyncio
 import logging
 import os
@@ -119,7 +120,10 @@ class AsyncBrowserPool:
             ctx = await self.acquire(platform)
             if ctx is None:
                 return None
-            self._refcount += 1
+            # Increment refcount inside the lock to avoid race conditions
+            # when multiple coroutines call new_page() concurrently.
+            async with self._lock:
+                self._refcount += 1
             return await ctx.new_page()
         except Exception as e:
             await self.release()

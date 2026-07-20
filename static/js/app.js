@@ -416,9 +416,14 @@ async function onFlightNoInput() {
         const currentFn = document.getElementById("qpFlightNo").value.trim().toUpperCase();
         if (currentFn !== fn) return; // input changed
         quickFlightData = await lookupFlight(fn);
-        if (quickFlightData && quickFlightData.found) {
+        if (quickFlightData && quickFlightData.found && quickFlightData.dep_city && quickFlightData.arr_city) {
+            // Local DB has full route info (with city names)
             const f = quickFlightData;
-            infoText.textContent = `${f.airline} ${f.flight_no} | ${f.dep_city}(${f.departure_time}) -> ${f.arr_city}(${f.arrival_time}) | ${f.aircraft} | ${Math.floor(f.duration_min / 60)}h${f.duration_min % 60}m`;
+            const depTime = f.departure_time || '时间待定';
+            const arrTime = f.arrival_time || '待定';
+            const duration = f.duration_min ? `${Math.floor(f.duration_min / 60)}h${f.duration_min % 60}m` : '—';
+            const aircraft = f.aircraft || '—';
+            infoText.textContent = `${f.airline} ${f.flight_no} | ${f.dep_city}(${depTime}) -> ${f.arr_city}(${arrTime}) | ${aircraft} | ${duration}`;
             infoEl.style.display = "flex";
             depGroup.style.display = "none";
             arrGroup.style.display = "none";
@@ -426,40 +431,77 @@ async function onFlightNoInput() {
             document.getElementById("qpDestination").value = f.arr_city || "";
             autoFetchBingPrice();
         } else {
-            // Not in local DB — try Bing route lookup
-            infoText.textContent = "正在Bing搜索航班航线信息...";
+            // Not in local DB, or local DB has no city info — try Bing route lookup
+            if (quickFlightData && quickFlightData.found && !quickFlightData.dep_city) {
+                infoText.textContent = `${quickFlightData.airline} ${fn} | 航线未知，正在Bing搜索...`;
+            } else {
+                infoText.textContent = "正在Bing搜索航班航线信息...";
+            }
             infoEl.style.display = "flex";
             depGroup.style.display = "none";
             arrGroup.style.display = "none";
-            const bingResult = await api("/api/flight/bing_route?flight_no=" + encodeURIComponent(fn));
-            if (bingResult && bingResult.found) {
-                // Bing found the route!
-                const cachedTag = bingResult._cached ? " (来自缓存)" : " (Bing实时搜索)";
-                infoText.textContent = `${bingResult.airline || fn} ${fn} | ${bingResult.dep_city} -> ${bingResult.arr_city}${cachedTag}`;
-                document.getElementById("qpDeparture").value = bingResult.dep_city || "";
-                document.getElementById("qpDestination").value = bingResult.arr_city || "";
-                depGroup.style.display = "none";
-                arrGroup.style.display = "none";
-                quickFlightData = {
-                    found: true,
-                    airline: bingResult.airline || fn,
-                    flight_no: fn,
-                    dep_city: bingResult.dep_city,
-                    arr_city: bingResult.arr_city,
-                    departure_time: "",
-                    arrival_time: "",
-                    aircraft: "",
-                    duration_min: 150,
-                };
-                autoFetchBingPrice();
-            } else {
-                // Neither local DB nor Bing found it
-                infoText.textContent = "航班号未找到，请手动输入出发地和目的地";
+            try {
+                const bingResult = await api("/api/flight/bing_route?flight_no=" + encodeURIComponent(fn));
+                if (bingResult && bingResult.found && bingResult.dep_city) {
+                    // Bing found the route!
+                    const cachedTag = bingResult._cached ? " (来自缓存)" : " (Bing实时搜索)";
+                    // Merge local DB info (time/aircraft) with Bing city info
+                    const merged = quickFlightData && quickFlightData.found ? quickFlightData : {};
+                    infoText.textContent = `${bingResult.airline || merged.airline || fn} ${fn} | ${bingResult.dep_city}(${merged.departure_time || bingResult.dep_city || '—'}) -> ${bingResult.arr_city}(${merged.arrival_time || bingResult.arr_city || '—'})${cachedTag}`;
+                    document.getElementById("qpDeparture").value = bingResult.dep_city || "";
+                    document.getElementById("qpDestination").value = bingResult.arr_city || "";
+                    depGroup.style.display = "none";
+                    arrGroup.style.display = "none";
+                    quickFlightData = {
+                        found: true,
+                        airline: bingResult.airline || merged.airline || fn,
+                        flight_no: fn,
+                        dep_city: bingResult.dep_city,
+                        arr_city: bingResult.arr_city,
+                        dep_airport: bingResult.dep_airport || merged.dep_airport || '',
+                        arr_airport: bingResult.arr_airport || merged.arr_airport || '',
+                        departure_time: merged.departure_time || "",
+                        arrival_time: merged.arrival_time || "",
+                        aircraft: merged.aircraft || "",
+                        duration_min: merged.duration_min || 150,
+                    };
+                    autoFetchBingPrice();
+                } else {
+                    // Neither local DB nor Bing found the route.
+                    // Use airline-base hint to pre-fill departure city.
+                    const hintDep = (quickFlightData && quickFlightData.dep_city_hint) || "";
+                    const hintAirline = (quickFlightData && quickFlightData.airline) || "";
+                    if (quickFlightData && quickFlightData.found) {
+                        infoText.textContent = `${quickFlightData.airline} ${fn} | 航线未知(Bing也未找到)，请补充${hintDep ? '目的地' : '出发地和目的地'}`;
+                    } else if (hintDep) {
+                        infoText.textContent = `${hintAirline || fn} | 未找到航线，已根据航司基城预填出发地为"${hintDep}"，请确认或修改`;
+                    } else {
+                        infoText.textContent = "航班号未找到，请手动输入出发地和目的地";
+                    }
+                    depGroup.style.display = "";
+                    arrGroup.style.display = "";
+                    const depInput = document.getElementById("qpDeparture");
+                    const arrInput = document.getElementById("qpDestination");
+                    if (hintDep && !depInput.value) depInput.value = hintDep;
+                    depInput.placeholder = hintDep ? `已预填: ${hintDep}` : "出发地";
+                    arrInput.placeholder = "目的地";
+                    document.getElementById("qpPrice").placeholder = "请手动填写价格";
+                    // Don't null out quickFlightData — keep the hint so doQuickPredict works
+                    if (!quickFlightData) {
+                        quickFlightData = { found: false, airline: hintAirline, flight_no: fn };
+                    } else {
+                        quickFlightData.found = false;
+                    }
+                }
+            } catch (e) {
+                // Bing lookup failed
+                infoText.textContent = "Bing搜索失败，请手动输入出发地和目的地";
                 depGroup.style.display = "";
                 arrGroup.style.display = "";
                 document.getElementById("qpDeparture").placeholder = "出发地";
                 document.getElementById("qpDestination").placeholder = "目的地";
                 document.getElementById("qpPrice").placeholder = "请手动填写价格";
+                quickFlightData = null;
             }
         }
     }, 400);
@@ -763,7 +805,7 @@ async function refreshDashboard() {
                             </div>
                             <div class="route-date">${escapeHTML(p.departure_date)} ${labelSafe ? "· " + labelSafe : ""}</div>
                             <div class="route-sparkline" id="sparkline${idx}" style="margin-top:6px;">
-                                <span style="font-size:11px;color:var(--text-muted);cursor:pointer;" onclick="fetchRouteSparkline(${idx}, '${escapeHTML(p.departure)}', '${escapeHTML(p.destination)}', '${escapeHTML(p.departure_date)}')">📈 查看趋势</span>
+                                <span class="sparkline-trigger" data-idx="${idx}" data-dep="${escapeHTML(p.departure)}" data-arr="${escapeHTML(p.destination)}" data-date="${escapeHTML(p.departure_date)}" style="font-size:11px;color:var(--text-muted);cursor:pointer;">📈 查看趋势</span>
                             </div>
                         </div>
                     </div>
@@ -773,6 +815,17 @@ async function refreshDashboard() {
                     </div>
                 </div>`;
             }).join("");
+            // Bind click handlers via addEventListener (avoids inline onclick XSS).
+            routeList.querySelectorAll(".sparkline-trigger").forEach(el => {
+                el.addEventListener("click", () => {
+                    fetchRouteSparkline(
+                        parseInt(el.dataset.idx, 10),
+                        el.dataset.dep,
+                        el.dataset.arr,
+                        el.dataset.date
+                    );
+                });
+            });
             const minAll = Math.min(...data.route_prices.map(p => p.price));
             document.getElementById("statLowestPrice").textContent = Math.round(minAll);
         }
@@ -1023,7 +1076,16 @@ async function clearAllQueries() {
     refreshDashboard();
 }
 
+// Guard against double-click / concurrent searchNow calls on the same query.
+let _searchNowInFlight = new Set();
+
 async function searchNow(queryId) {
+    if (_searchNowInFlight.has(queryId)) {
+        toast("正在搜索中，请稍候...", "");
+        return;
+    }
+    _searchNowInFlight.add(queryId);
+    try {
     const modal = document.getElementById("searchResultsModal");
     const content = document.getElementById("searchResults");
     if (modal && content) {
@@ -1077,7 +1139,7 @@ async function searchNow(queryId) {
         } catch (e) {
             clearTimeout(timers[0]);
             clearTimeout(timers[1]);
-            content.innerHTML = `<div class="empty-state"><p>搜索失败: ${e.message}</p></div>`;
+            content.innerHTML = `<div class="empty-state"><p>搜索失败: ${escapeHTML(e.message)}</p></div>`;
             toast("搜索失败: " + e.message, "error");
         }
     } else {
@@ -1090,6 +1152,9 @@ async function searchNow(queryId) {
             loadQueriesShared(true);
             refreshDashboard();
         } catch (e) { toast("搜索失败: " + e.message, "error"); }
+    }
+    } finally {
+        _searchNowInFlight.delete(queryId);
     }
 }
 
@@ -1104,12 +1169,12 @@ async function showPricePrediction(queryId) {
     try {
         const data = await api(`/api/queries/${queryId}/predict`, "GET");
         if (data.error) {
-            infoEl.innerHTML = `<div class="empty-state"><p>${data.error}</p></div>`;
+            infoEl.innerHTML = `<div class="empty-state"><p>${escapeHTML(data.error)}</p></div>`;
             return;
         }
         renderPredictionChart(data);
     } catch (e) {
-        infoEl.innerHTML = `<div class="empty-state"><p>预测加载失败: ${e.message}</p></div>`;
+        infoEl.innerHTML = `<div class="empty-state"><p>预测加载失败: ${escapeHTML(e.message)}</p></div>`;
     }
 }
 
@@ -1657,6 +1722,8 @@ async function loadTrendChart() {
         renderChart(history);
         renderTrendStats(stats);
         renderTrendFlights(prices);
+        // Also load model info for M4
+        loadModelInfo(queryId);
     } catch (e) { toast("加载趋势数据失败", "error"); }
 }
 
@@ -1787,6 +1854,140 @@ async function refreshTrendFlights() {
         toast("价格已更新！", "success");
         loadTrendChart();
     } catch (e) { toast("刷新失败", "error"); }
+}
+
+// ── Model Management (M4) ───────────────────────────────────
+
+async function loadModelInfo(queryId) {
+    if (!queryId) return;
+    try {
+        const info = await api(`/api/queries/${queryId}/model_info`);
+        document.getElementById('modelInfoCard').style.display = 'block';
+        document.getElementById('modelVersionsCard').style.display = 'none';
+        const content = document.getElementById('modelInfoContent');
+        if (!info.has_model) {
+            content.innerHTML = `
+                <div class="empty-state">
+                    <p>暂无训练好的模型</p>
+                    <p style="font-size:13px;color:var(--text-secondary);">收集 ≥10 条价格数据后点击"训练模型"</p>
+                </div>`;
+            return;
+        }
+        const m = info.latest_metrics || {};
+        content.innerHTML = `
+            <div class="stats-grid" style="margin-bottom:12px;">
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#2563eb;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value">v${info.latest_version}</div>
+                        <div class="stat-label">当前版本</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#16a34a;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value">${(m.r2 ?? 0).toFixed(2)}</div>
+                        <div class="stat-label">R² 拟合度</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#fef3c7,#fde68a);color:#d97706;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value">${(m.rmse ?? 0).toFixed(0)}</div>
+                        <div class="stat-label">RMSE (元)</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" style="background:linear-gradient(135deg,#fce7f3,#fbcfe8);color:#db2777;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value">${(m.mape ?? 0).toFixed(1)}%</div>
+                        <div class="stat-label">MAPE</div>
+                    </div>
+                </div>
+            </div>
+            <div style="color:var(--text-secondary);font-size:13px;">
+                <span>总版本数: ${info.total_versions}</span>
+                ${info.best_r2_version ? `<span style="margin-left:16px;">最佳 R² 版本: v${info.best_r2_version}</span>` : ''}
+            </div>
+        `;
+    } catch (e) { /* card stays hidden if no model */ }
+}
+
+async function trainModel() {
+    const queryId = document.getElementById('trendQuerySelect').value;
+    if (!queryId) return;
+    const btn = document.getElementById('btnTrainModel');
+    btn.disabled = true;
+    btn.textContent = '训练中...';
+    try {
+        const result = await api(`/api/queries/${queryId}/train`, 'POST');
+        if (result.status === 'insufficient_data') {
+            toast(`数据不足: ${result.message}`, 'warning');
+        } else if (result.status === 'ok') {
+            toast(`训练完成！版本 v${result.version}，R²=${result.metrics.r2.toFixed(2)}`, 'success');
+            loadModelInfo(queryId);
+        } else {
+            toast(`训练失败: ${result.error || '未知错误'}`, 'error');
+        }
+    } catch (e) { toast('训练请求失败', 'error'); }
+    finally {
+        btn.disabled = false;
+        btn.textContent = '训练模型';
+    }
+}
+
+async function loadModelVersions() {
+    const queryId = document.getElementById('trendQuerySelect').value;
+    if (!queryId) return;
+    try {
+        const versions = await api(`/api/queries/${queryId}/model_versions`);
+        const card = document.getElementById('modelVersionsCard');
+        const list = document.getElementById('modelVersionsList');
+        document.getElementById('modelVersionsHint').textContent = `共 ${versions.length} 个版本`;
+        if (versions.length === 0) {
+            list.innerHTML = '<div class="empty-state"><p>暂无版本记录</p></div>';
+            card.style.display = 'block';
+            return;
+        }
+        let html = '<div style="display:flex;flex-direction:column;gap:8px;">';
+        versions.slice().reverse().forEach(v => {
+            const m = v.metrics || {};
+            html += `
+                <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);">
+                    <div style="font-weight:600;font-size:15px;min-width:60px;">v${v.version}</div>
+                    <div style="flex:1;display:flex;gap:16px;font-size:13px;color:var(--text-secondary);">
+                        <span>R²=<strong>${(m.r2 ?? 0).toFixed(2)}</strong></span>
+                        <span>RMSE=<strong>${(m.rmse ?? 0).toFixed(0)}</strong></span>
+                        <span>MAPE=<strong>${(m.mape ?? 0).toFixed(1)}%</strong></span>
+                    </div>
+                    <div style="font-size:12px;color:var(--text-tertiary);">${v.created_at ? v.created_at.slice(0, 19).replace('T', ' ') : ''}</div>
+                    <button class="btn btn-sm btn-ghost" onclick="rollbackModel(${v.version})" title="回滚到此版本" aria-label="回滚到 v${v.version}" style="padding:2px 8px;">回滚</button>
+                </div>`;
+        });
+        html += '</div>';
+        list.innerHTML = html;
+        card.style.display = 'block';
+    } catch (e) { toast('加载版本列表失败', 'error'); }
+}
+
+async function rollbackModel(version) {
+    const queryId = document.getElementById('trendQuerySelect').value;
+    if (!queryId) return;
+    if (!confirm(`确认回滚到 v${version}？v${version} 之后的所有版本将被删除。`)) return;
+    try {
+        const result = await api(`/api/queries/${queryId}/model_rollback`, 'POST', { version });
+        toast(`已回滚到 v${result.version}`, 'success');
+        loadModelInfo(queryId);
+        loadModelVersions();
+    } catch (e) { toast('回滚失败', 'error'); }
 }
 
 // ── Alerts ───────────────────────────────────────────────────

@@ -40,7 +40,6 @@ try:
     from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
     from sklearn.linear_model import Ridge
     from sklearn.model_selection import TimeSeriesSplit
-    from sklearn.preprocessing import StandardScaler
     _HAS_SKLEARN = True
 except ImportError:
     pass
@@ -67,7 +66,9 @@ class PricePredictorV3:
     def __init__(self, indian_priors_path: Optional[str] = None):
         self.has_sklearn = _HAS_SKLEARN
         self.priors = {}
-        self.scaler = StandardScaler() if self.has_sklearn else None
+        # NOTE: StandardScaler was previously created but never wired into
+        # fit/predict. Removed to avoid misleading code. If feature scaling is
+        # needed later, add it explicitly in _fit_online_model / predict_online.
         self.online_model = None
         self.prior_model = None
         self._is_fitted = False
@@ -108,16 +109,16 @@ class PricePredictorV3:
         X_matrix = [[x.get(name, 0.0) for name in feature_names] for x in X]
         y_array = list(y)
 
-        # Walk-forward validation to tune hyperparameters
+        # Walk-forward validation to tune hyperparameters (only for GBR with enough data)
         best_score = -float('inf')
         best_params = {}
-        if len(X) >= 30:
+        if len(X) >= 50:
             best_params = self._tune_hyperparams(X_matrix, y_array)
         else:
             best_params = {"n_estimators": 50, "max_depth": 3, "learning_rate": 0.05}
 
         # Train final model
-        self.online_model = self._build_model(**best_params)
+        self.online_model = self._build_model(**best_params, n_samples=len(X))
         self.online_model.fit(np.array(X_matrix), np.array(y_array))
         self._is_fitted = True
 
@@ -128,7 +129,7 @@ class PricePredictorV3:
         r2 = 1 - ss_res / max(ss_tot, 1e-10)
         rmse = math.sqrt(ss_res / len(y))
 
-        logger.info(f"Online model fitted (n={len(X)}, R²={r2:.3f}, RMSE={rmse:.0f})")
+        logger.info(f"Online model fitted (n={len(X)}, R²={r2:.3f}, RMSE={rmse:.0f}, model={type(self.online_model).__name__})")
 
     def _tune_hyperparams(self, X, y, n_splits=3) -> Dict:
         """Walk-forward hyperparameter tuning."""
@@ -175,17 +176,23 @@ class PricePredictorV3:
         logger.info(f"Walk-forward tuning: best R²={best_score:.3f}, params={best_params}")
         return best_params
 
-    def _build_model(self, n_estimators, max_depth, learning_rate, subsample=0.8):
-        """Build the sklearn ensemble model."""
+    def _build_model(self, n_estimators, max_depth, learning_rate, subsample=0.8, n_samples=None):
+        """Build the sklearn model. Ridge for small samples, GBR for large."""
         if not self.has_sklearn:
             return None
+        if n_samples is None:
+            n_samples = 100
+        # Ridge for small samples (regularization prevents overfitting)
+        if n_samples < 50:
+            return Ridge(alpha=1.0)
+        # GBR for large samples (can capture nonlinear patterns)
         return GradientBoostingRegressor(
             n_estimators=n_estimators,
             max_depth=max_depth,
             learning_rate=learning_rate,
             subsample=subsample,
             random_state=42,
-            min_samples_leaf=3,
+            min_samples_leaf=max(5, n_samples // 10),
         )
 
     # ── Prediction ──────────────────────────────────────────
@@ -356,6 +363,7 @@ class PricePredictorV3:
         n_splits: int = 5,
         min_train_size: int = 10,
         purge_gap: int = 1,
+        departure_date: str = "",
     ) -> Dict:
         """Run walk-forward backtest on historical records.
 
@@ -371,7 +379,10 @@ class PricePredictorV3:
         fold_predictions = []
         fold_actuals = []
 
-        fold_size = max(1, (len(sorted_records) - min_train_size) // n_splits)
+        # Expanding window: train on all past data, test on next chunk
+        # This maximizes training data usage for small datasets
+        usable = len(sorted_records) - min_train_size
+        fold_size = max(2, usable // n_splits)
 
         for fold_i in range(n_splits):
             split_point = min_train_size + fold_i * fold_size
@@ -379,7 +390,7 @@ class PricePredictorV3:
                 break
 
             train_data = sorted_records[:split_point]
-            # ── Purge Gap (PDF §7.2): exclude purge_gap days between train/test ──
+            # Purge Gap: exclude purge_gap days between train/test
             test_start = min(split_point + purge_gap, len(sorted_records))
             test_data = sorted_records[test_start:min(test_start + fold_size, len(sorted_records))]
             if not test_data:
@@ -387,15 +398,27 @@ class PricePredictorV3:
 
             # Build training data
             X_train, y_train = [], []
-            for t in range(len(train_data) - 1):
+            for t in range(3, len(train_data) - 1):
                 past = train_data[:t + 1]
+                time_idx = (t + 1) / len(train_data)
+                # Compute days_until_departure
+                rec_date_str = train_data[t + 1].get("date", "")
+                days_until = 14
+                if departure_date and rec_date_str:
+                    try:
+                        dep_dt = datetime.strptime(departure_date, "%Y-%m-%d")
+                        rec_dt = datetime.strptime(rec_date_str, "%Y-%m-%d")
+                        days_until = max(0, (dep_dt - rec_dt).days)
+                    except ValueError:
+                        pass
                 feats = extract_features(
                     records=past,
-                    days_until_departure=train_data[t + 1].get("days_until_departure", 14),
+                    days_until_departure=days_until,
                     departure_city=departure_city,
                     destination_city=destination_city,
-                    departure_date=train_data[t + 1].get("date", ""),
+                    departure_date=rec_date_str,
                     holidays=holidays,
+                    time_index=time_idx,
                 )
                 X_train.append(feats)
                 y_train.append(train_data[t + 1].get("price", 0))
@@ -405,20 +428,31 @@ class PricePredictorV3:
 
             # Train model
             if self.has_sklearn and len(X_train) > 10:
-                model = self._build_model(50, 3, 0.05)
+                model = self._build_model(50, 3, 0.05, n_samples=len(X_train))
                 feature_names = _get_feature_names()
                 X_mat = [[x.get(name, 0.0) for name in feature_names] for x in X_train]
                 model.fit(np.array(X_mat), np.array(y_train))
 
                 # Test on future
                 for test_record in test_data:
+                    test_time_idx = (len(train_data) + test_data.index(test_record)) / len(sorted_records)
+                    test_rec_date = test_record.get("date", "")
+                    test_days_until = 14
+                    if departure_date and test_rec_date:
+                        try:
+                            dep_dt = datetime.strptime(departure_date, "%Y-%m-%d")
+                            rec_dt = datetime.strptime(test_rec_date, "%Y-%m-%d")
+                            test_days_until = max(0, (dep_dt - rec_dt).days)
+                        except ValueError:
+                            pass
                     feats = extract_features(
                         records=train_data,
-                        days_until_departure=test_record.get("days_until_departure", 14),
+                        days_until_departure=test_days_until,
                         departure_city=departure_city,
                         destination_city=destination_city,
-                        departure_date=test_record.get("date", ""),
+                        departure_date=test_rec_date,
                         holidays=holidays,
+                        time_index=test_time_idx,
                     )
                     X_test = [[feats.get(name, 0.0) for name in feature_names]]
                     pred = model.predict(np.array(X_test))[0]
@@ -494,19 +528,34 @@ class PricePredictorV3:
         departure: str,
         destination: str,
         holidays: List = None,
+        departure_date: str = "",
     ) -> Tuple[List[Dict], List[float]]:
         """Build supervised training data from historical records."""
         holidays = holidays or []
         X, y = [], []
-        for t in range(len(historical_records) - 1):
+        # Skip first 3 samples: rolling_stats cannot be computed reliably
+        for t in range(3, len(historical_records) - 1):
             past = historical_records[:t + 1]
+            # time_index: normalized position in sequence (0..1) for trend learning
+            time_idx = (t + 1) / len(historical_records)
+            # Compute days_until_departure from departure_date - record_date
+            rec_date_str = historical_records[t + 1].get("date", "")
+            days_until = 14  # default
+            if departure_date and rec_date_str:
+                try:
+                    dep_dt = datetime.strptime(departure_date, "%Y-%m-%d")
+                    rec_dt = datetime.strptime(rec_date_str, "%Y-%m-%d")
+                    days_until = max(0, (dep_dt - rec_dt).days)
+                except ValueError:
+                    pass
             feats = extract_features(
                 records=past,
-                days_until_departure=1,
+                days_until_departure=days_until,
                 departure_city=departure,
                 destination_city=destination,
-                departure_date=historical_records[t + 1].get("date", ""),
+                departure_date=rec_date_str,
                 holidays=holidays,
+                time_index=time_idx,
             )
             X.append(feats)
             y.append(historical_records[t + 1].get("price", 0))

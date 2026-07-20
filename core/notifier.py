@@ -67,6 +67,7 @@ class Notifier:
         message: str,
         send_email: bool = True,
         send_wechat: bool = False,
+        send_feishu: bool = True,
         query_id: Optional[int] = None,
         price: Optional[float] = None,
     ):
@@ -100,7 +101,7 @@ class Notifier:
             self._executor.submit(self._send_email, title, message)
         if send_wechat:
             self._executor.submit(self._send_serverchan, title, message)
-        if FEISHU_WEBHOOK:
+        if send_feishu and FEISHU_WEBHOOK:
             self._executor.submit(self._send_feishu, title, message)
 
     def close(self):
@@ -139,7 +140,7 @@ class Notifier:
             """
             msg.attach(MIMEText(html_content, "html", "utf-8"))
 
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
                 server.login(SMTP_USER, SMTP_PASS)
                 server.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
             logger.info(f"Email notification sent: {subject}")
