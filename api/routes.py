@@ -2,13 +2,14 @@
 Flight Monitor - Flask API Routes
 RESTful API for the flight monitor frontend.
 """
+import hashlib
+import hmac
+import io
 import logging
 import os
 import csv
-import io
 import time
 import threading
-import hashlib
 from collections import defaultdict, deque
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, Response
@@ -26,7 +27,12 @@ logger = logging.getLogger(__name__)
 
 # ── Security / rate-limit config (env-driven, off by default for local use) ──
 API_KEY = os.environ.get("FLIGHT_MONITOR_API_KEY", "")
+# Explicit opt-in for open mode (no API key required). Default: protected.
+OPEN_MODE = os.environ.get("FLIGHT_MONITOR_OPEN_MODE", "").lower() in ("1", "true", "yes")
 CORS_ORIGIN = os.environ.get("FLIGHT_MONITOR_CORS_ORIGIN", "*")
+# Comma-separated list of trusted proxy IPs. Only these can pass X-Forwarded-For.
+# Empty = trust no proxies (use remote_addr only). "*" = trust all (insecure).
+TRUSTED_PROXIES = os.environ.get("FLIGHT_MONITOR_TRUSTED_PROXIES", "")
 
 # Valid cabin_class / trip_type values for input validation.
 _VALID_CABIN = {"economy", "business", "first"}
@@ -65,7 +71,28 @@ _rate_limiter = _RateLimiter()
 
 
 def _client_ip():
-    return request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+    """Get client IP with trusted proxy support.
+
+    Only uses X-Forwarded-For when the immediate connection (remote_addr)
+    comes from a trusted proxy. This prevents IP spoofing by clients.
+    """
+    remote = request.remote_addr or "unknown"
+    if not TRUSTED_PROXIES:
+        # No trusted proxies configured — ignore X-Forwarded-For entirely.
+        return remote
+    if TRUSTED_PROXIES != "*" and remote not in TRUSTED_PROXIES.split(","):
+        # Direct connection or untrusted proxy — don't trust XFF.
+        return remote
+    # Trusted proxy — use the right-most entry in XFF (closest to proxy).
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        # Take the right-most non-trusted IP (the client closest to our proxy).
+        ips = [ip.strip() for ip in xff.split(",")]
+        # Walk from right to left, return first IP that isn't a trusted proxy.
+        for ip in reversed(ips):
+            if ip and (TRUSTED_PROXIES == "*" or ip not in TRUSTED_PROXIES.split(",")):
+                return ip
+    return remote
 
 
 def _check_api_key():
@@ -73,8 +100,10 @@ def _check_api_key():
 
     Returns None when the request is allowed to proceed.
     """
+    # Local-first: if no API key is configured, allow all requests.
+    # Set FLIGHT_MONITOR_API_KEY to enable write-protection.
     if not API_KEY:
-        return None  # No key configured → open mode (local dev).
+        return None
     provided = request.headers.get("X-API-Key") or request.args.get("api_key", "")
     if provided == API_KEY:
         return None
@@ -89,10 +118,19 @@ def _stable_seed(*parts):
 
 def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
     """Create and configure the Flask application."""
+    _base = os.path.dirname(__file__)
+    _parent = os.path.dirname(_base)
+
+    # Security warnings at startup
+    if not API_KEY:
+        logger.warning("[WARN] FLIGHT_MONITOR_API_KEY is not set. Write endpoints are open to all requests. Set API_KEY to enable protection.")
+
+    # Prefer native JS frontend.
+    # frontend/dist/ is an inactive Vue 3 build (M1 completed but not maintained).
     app = Flask(
         __name__,
-        template_folder=os.path.join(os.path.dirname(__file__), "..", "templates"),
-        static_folder=os.path.join(os.path.dirname(__file__), "..", "static"),
+        template_folder=os.path.join(_base, "..", "templates"),
+        static_folder=os.path.join(_base, "..", "static"),
     )
 
     if db is None:
@@ -127,6 +165,27 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         # Don't leak stack traces to clients.
         logger.exception("Unhandled 500 error")
         return jsonify({"error": "internal server error"}), 500
+
+    # ── Unified write-endpoint auth ──────────────────────────────
+    @app.before_request
+    def _enforce_write_auth():
+        """Require API key (when set) for all write methods under /api/.
+
+        This catches every write endpoint, including ones that missed an
+        explicit _check_api_key() call. GET/OPTIONS always pass through.
+        """
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return None
+        if not request.path.startswith("/api/"):
+            return None
+        if not API_KEY:
+            # No key configured — keep backwards-compatible open behavior.
+            return None
+        # Use constant-time comparison to avoid timing attacks.
+        provided = request.headers.get("X-API-Key") or request.args.get("api_key", "")
+        if not provided or not hmac.compare_digest(provided, API_KEY):
+            return jsonify({"error": "invalid or missing API key"}), 401
+        return None
 
     # ── Pages ───────────────────────────────────────────────────
 
@@ -177,7 +236,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         limit = request.args.get("limit", type=int)
         if limit is not None:
             limit = max(1, min(limit, 1000))
-        offset = max(0, request.args.get("offset", 0, type=int))
+        offset = max(0, request.args.get("offset", 0, type=int) or 0)
         all_queries = db.get_all_queries()
 
         # Backend filter: drop seed (label with (near)/(far)) when scope=user
@@ -318,8 +377,9 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             return jsonify({"error": "Query not found"}), 404
 
         try:
-            # 1. Trigger crawler/monitor to get latest prices
-            prices = monitor.check_query(q)
+            # 1. Trigger one-shot search across ALL sources for max coverage
+            # (NOT check_query which stops at first successful source)
+            prices = monitor.search_once(q)
 
             # 2. Dispatch to Aggregator for O(N) high-speed processing
             from core.aggregator import FlightAggregator
@@ -404,6 +464,13 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         query_id = request.args.get("query_id", type=int)
         records = db.get_all_prices_for_export(query_id)
 
+        def _csv_safe(val):
+            """Prevent CSV formula injection: prefix risky chars with a quote."""
+            s = str(val) if val is not None else ""
+            if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+                return "'" + s
+            return s
+
         output = io.StringIO()
         output.write('\ufeff')  # UTF-8 BOM for Excel compatibility
         writer = csv.writer(output)
@@ -415,24 +482,24 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         ])
         for r in records:
             writer.writerow([
-                f"{r.get('departure', '')} -> {r.get('destination', '')}",
-                r.get("departure", ""),
-                r.get("destination", ""),
-                r.get("departure_date", ""),
-                r.get("airline", ""),
-                r.get("flight_no", ""),
-                r.get("aircraft", ""),
-                r.get("departure_time", ""),
-                r.get("arrival_time", ""),
-                r.get("departure_airport", ""),
-                r.get("arrival_airport", ""),
-                r.get("duration", ""),
+                _csv_safe(f"{r.get('departure', '')} -> {r.get('destination', '')}"),
+                _csv_safe(r.get("departure", "")),
+                _csv_safe(r.get("destination", "")),
+                _csv_safe(r.get("departure_date", "")),
+                _csv_safe(r.get("airline", "")),
+                _csv_safe(r.get("flight_no", "")),
+                _csv_safe(r.get("aircraft", "")),
+                _csv_safe(r.get("departure_time", "")),
+                _csv_safe(r.get("arrival_time", "")),
+                _csv_safe(r.get("departure_airport", "")),
+                _csv_safe(r.get("arrival_airport", "")),
+                _csv_safe(r.get("duration", "")),
                 r.get("stops", 0),
                 r.get("price", 0),
-                r.get("cabin_class", ""),
-                r.get("source", ""),
-                r.get("recorded_at", ""),
-                r.get("purchase_url", ""),
+                _csv_safe(r.get("cabin_class", "")),
+                _csv_safe(r.get("source", "")),
+                _csv_safe(r.get("recorded_at", "")),
+                _csv_safe(r.get("purchase_url", "")),
             ])
 
         output.seek(0)
@@ -458,6 +525,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
                 "is_active": a.is_active,
                 "notify_email": a.notify_email,
                 "notify_wechat": a.notify_wechat,
+                "notify_feishu": a.notify_feishu,
                 "created_at": a.created_at,
                 "last_triggered": a.last_triggered,
                 "query_label": q.label if q else "",
@@ -490,6 +558,7 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             is_active=data.get("is_active", True),
             notify_email=data.get("notify_email", True),
             notify_wechat=data.get("notify_wechat", False),
+            notify_feishu=data.get("notify_feishu", True),
         )
         alert_id = db.add_alert(alert)
         return jsonify({"id": alert_id, "message": "Alert created"}), 201
@@ -584,6 +653,88 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         return jsonify({"message": "Monitor stopped", "running": False})
 
     # ── Flight schedule lookup ────────────────────────────────────
+
+    def _infer_flight_route(flight_no: str, sched: dict) -> dict | None:
+        """Infer departure/arrival cities when schedule data lacks city info.
+
+        Uses airline base city + common domestic trunk routes to guess
+        the route. Only returns a result when the inference is plausible.
+        """
+        base_info = _get_airline_base(flight_no)
+        if not base_info:
+            return None
+        base_city, base_airport = base_info
+        # Common domestic city pairs for trunk routes
+        COMMON_TRUNK_DESTINATIONS = {
+            "北京": ["上海", "广州", "深圳", "成都", "西安", "杭州", "南京", "厦门", "武汉", "长沙", "重庆", "昆明"],
+            "上海": ["北京", "广州", "深圳", "成都", "西安", "厦门", "三亚", "桂林", "昆明", "重庆", "贵阳"],
+            "广州": ["北京", "上海", "成都", "杭州", "南京", "海口", "三亚", "昆明", "西安", "厦门", "重庆"],
+            "成都": ["北京", "上海", "广州", "深圳", "拉萨", "昆明", "西安", "杭州", "南京"],
+            "深圳": ["北京", "上海", "成都", "杭州", "南京", "西安", "昆明", "重庆"],
+            "厦门": ["北京", "上海", "广州", "深圳", "成都", "杭州"],
+            "海口": ["北京", "上海", "广州", "深圳", "成都", "三亚"],
+            "济南": ["北京", "上海", "广州", "深圳", "成都", "厦门"],
+            "杭州": ["北京", "广州", "深圳", "成都", "西安", "昆明"],
+            "贵阳": ["北京", "上海", "广州", "深圳"],
+            "天津": ["上海", "广州", "深圳", "成都", "西安"],
+        }
+        dep_city = sched.get("dep_city", "")
+        arr_city = sched.get("arr_city", "")
+        dep_airport = sched.get("dep_airport", "")
+        arr_airport = sched.get("arr_airport", "")
+
+        # If either city is known, don't override
+        if dep_city and arr_city:
+            return None
+
+        # If we know one city but not the other, try to infer the other
+        known_city = dep_city or arr_city
+        is_dep_known = bool(dep_city)
+
+        if known_city:
+            # City already known from one side — cannot infer the other reliably
+            return None
+
+        # Both cities unknown: assume flight departs from airline base
+        # and arrives at the most common trunk destination
+        if not dep_city and not arr_city:
+            common_dests = COMMON_TRUNK_DESTINATIONS.get(base_city, ["北京"])
+            dest = common_dests[0] if common_dests else "北京"
+            try:
+                from config import get_config
+                cfg = get_config()
+                dest_airport = cfg.city_codes.get(dest, "")
+            except Exception:
+                dest_airport = ""
+            return {
+                "dep_city": base_city,
+                "arr_city": dest,
+                "dep_airport": dep_airport or base_airport,
+                "arr_airport": arr_airport or dest_airport,
+            }
+        return None
+
+    def _get_airline_base(flight_no: str) -> tuple | None:
+        """Get airline base city and airport code from flight number prefix.
+
+        Returns (city_name, airport_code) or None if unknown.
+        """
+        AIRLINE_BASES = {
+            "CA": ("北京", "PEK"), "MU": ("上海", "SHA"), "CZ": ("广州", "CAN"),
+            "HU": ("海口", "HAK"), "ZH": ("深圳", "SZX"), "MF": ("厦门", "XMN"),
+            "3U": ("成都", "CTU"), "9C": ("上海", "SHA"), "HO": ("上海", "SHA"),
+            "SC": ("济南", "TNA"), "FM": ("上海", "SHA"), "KN": ("北京", "PKX"),
+            "JD": ("北京", "PEK"), "GS": ("天津", "TSN"), "G5": ("贵阳", "KWE"),
+            "EU": ("成都", "CTU"), "GJ": ("杭州", "HGH"),
+            # Additional airlines for better coverage
+            "AQ": ("泉州", "JJN"), "DR": ("珠海", "ZUH"), "DZ": ("海口", "HAK"),
+            "GX": ("南宁", "NNG"), "GT": ("海口", "HAK"), "NS": ("福州", "FOC"),
+            "PN": ("深圳", "SZX"), "QW": ("青岛", "TAO"), "RY": ("昆明", "KMG"),
+            "TV": ("昆明", "KMG"), "UQ": ("乌鲁木齐", "URC"), "Y8": ("深圳", "SZX"),
+        }
+        prefix = flight_no[:2].upper() if len(flight_no) >= 2 else ""
+        return AIRLINE_BASES.get(prefix)
+
     @app.route("/api/flight/<flight_no>", methods=["GET"])
     def flight_lookup(flight_no):
         """Look up flight schedule by flight number."""
@@ -593,10 +744,40 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             return jsonify({"found": False, "error": "schedule db not available"}), 501
         sched = lookup_flight_schedule(flight_no)
         if sched:
-            sched["found"] = True
+            # Only return found=true when we have usable city info
             sched["flight_no"] = flight_no.upper()
-            return jsonify(sched)
-        return jsonify({"found": False, "flight_no": flight_no.upper()})
+            # Auto-infer cities if missing
+            dep_city = sched.get("dep_city", "")
+            arr_city = sched.get("arr_city", "")
+            if not dep_city or not arr_city:
+                inferred = _infer_flight_route(flight_no, sched)
+                if inferred:
+                    sched["dep_city"] = inferred.get("dep_city", dep_city)
+                    sched["arr_city"] = inferred.get("arr_city", arr_city)
+                    sched["dep_airport"] = sched.get("dep_airport") or inferred.get("dep_airport", "")
+                    sched["arr_airport"] = sched.get("arr_airport") or inferred.get("arr_airport", "")
+            if sched.get("dep_city") and sched.get("arr_city"):
+                sched["found"] = True
+                return jsonify(sched)
+        # Not found in local DB — return airline base hint so the frontend
+        # can pre-fill the departure city instead of leaving it blank.
+        base = _get_airline_base(flight_no)
+        airline = (base[0] if base else "")
+        prefix = flight_no[:2].upper() if len(flight_no) >= 2 else ""
+        airline_map = {
+            "CA": "中国国航", "MU": "东方航空", "CZ": "南方航空",
+            "HU": "海南航空", "ZH": "深圳航空", "MF": "厦门航空",
+            "3U": "四川航空", "9C": "春秋航空", "HO": "吉祥航空",
+            "FM": "上海航空", "SC": "山东航空", "ZH": "深圳航空",
+        }
+        airline_name = airline_map.get(prefix, prefix)
+        return jsonify({
+            "found": False,
+            "flight_no": flight_no.upper(),
+            "airline": airline_name,
+            "dep_city_hint": base[0] if base else "",
+            "dep_airport_hint": base[1] if base else "",
+        })
 
     @app.route("/api/flight/search", methods=["GET"])
     def flight_search():
@@ -638,6 +819,24 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+
+        # If dep/arr are Chinese city names (not IATA codes), convert them.
+        # This happens when the frontend falls back to city names because
+        # Bing route lookup didn't return airport codes.
+        if len(dep) > 3 or not dep.isalpha():
+            try:
+                from config import get_config
+                cfg = get_config()
+                dep = cfg.city_codes.get(dep, dep)
+            except Exception:
+                pass
+        if len(arr) > 3 or not arr.isalpha():
+            try:
+                from config import get_config
+                cfg = get_config()
+                arr = cfg.city_codes.get(arr, arr)
+            except Exception:
+                pass
 
         # Map cabin to Ctrip param
         cabin_map = {"economy": "Y_S", "business": "C_S", "first": "F_S"}
@@ -894,19 +1093,24 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         drop_pct = (current - pred_min) / current * 100
         rise_pct = (pred_max - current) / current * 100
 
+        # Cap displayed percentages to avoid misleading extreme values
+        # (e.g., when forecast noise produces a 99% rise from a small base)
+        rise_pct_display = min(rise_pct, 50.0)
+        drop_pct_display = min(drop_pct, 50.0)
+
         buy = ""
         if days_until <= 3:
             buy = "距起飞仅%d天，建议立即购买" % days_until
         elif profile == "holiday":
-            buy = "节假日前%.0f%%涨幅预期，建议尽快锁定价格" % rise_pct
+            buy = "节假日前%.0f%%涨幅预期，建议尽快锁定价格" % rise_pct_display
         elif drop_pct >= 10 and days_until >= 14:
-            buy = "预计降至%.0f（降%.0f%%），最佳入手: %s" % (pred_min, drop_pct, min_date)
+            buy = "预计降至%.0f（降%.0f%%），最佳入手: %s" % (pred_min, drop_pct_display, min_date)
         elif drop_pct >= 5 and days_until >= 7:
             buy = "预计小幅下降至%.0f，可观望至%s" % (pred_min, min_date)
         elif rise_pct >= 5:
-            buy = "价格预计上涨%.0f%%，建议%d天内锁定" % (rise_pct, days_until // 2)
+            buy = "价格预计上涨%.0f%%，建议%d天内锁定" % (rise_pct_display, days_until // 2)
         elif rise_pct >= 3:
-            buy = "价格预计上涨%.0f%%，建议尽早入手" % rise_pct
+            buy = "价格预计上涨%.0f%%，建议尽早入手" % rise_pct_display
         elif drop_pct > 0:
             buy = "价格稳定，可观望至%s" % min_date
 
@@ -934,5 +1138,70 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
                 "upper_bound": [None] * (len(hist_prices) - 1) + [current] + upper,
             },
         })
+
+    # ── Model Management (M4) ────────────────────────────────────
+    @app.route("/api/queries/<int:query_id>/model_info", methods=["GET"])
+    def model_info(query_id):
+        """Get model status and latest version info for a query."""
+        if not db.get_query(query_id):
+            return jsonify({"error": "Query not found"}), 404
+        store = monitor.model_store
+        versions = store.list_versions(query_id)
+        latest = versions[-1] if versions else None
+        best_ver = store.get_best_version(query_id, metric="r2")
+        return jsonify({
+            "query_id": query_id,
+            "total_versions": len(versions),
+            "latest_version": latest["version"] if latest else None,
+            "latest_metrics": latest.get("metrics", {}) if latest else {},
+            "best_r2_version": best_ver,
+            "has_model": latest is not None,
+        })
+
+    @app.route("/api/queries/<int:query_id>/train", methods=["POST"])
+    def train_model(query_id):
+        """Trigger model training for a query and save a new version."""
+        auth_err = _check_api_key()
+        if auth_err:
+            return auth_err
+        if not _rate_limiter.allow(_client_ip(), max_calls=5, window_s=60):
+            return jsonify({"error": "rate limit exceeded"}), 429
+        if not db.get_query(query_id):
+            return jsonify({"error": "Query not found"}), 404
+        try:
+            result = monitor.train_and_save_model(query_id)
+            return jsonify(result)
+        except Exception as e:
+            logger.exception(f"train_model failed for query {query_id}")
+            return jsonify({"error": "training failed", "detail": str(e)[:200]}), 500
+
+    @app.route("/api/queries/<int:query_id>/model_versions", methods=["GET"])
+    def model_versions(query_id):
+        """List all model versions with metadata."""
+        if not db.get_query(query_id):
+            return jsonify({"error": "Query not found"}), 404
+        store = monitor.model_store
+        versions = store.list_versions(query_id)
+        return jsonify(versions)
+
+    @app.route("/api/queries/<int:query_id>/model_rollback", methods=["POST"])
+    def model_rollback(query_id):
+        """Rollback to a specific version (deletes all newer versions)."""
+        auth_err = _check_api_key()
+        if auth_err:
+            return auth_err
+        if not _rate_limiter.allow(_client_ip(), max_calls=5, window_s=60):
+            return jsonify({"error": "rate limit exceeded"}), 429
+        if not db.get_query(query_id):
+            return jsonify({"error": "Query not found"}), 404
+        data = request.get_json(silent=True) or {}
+        version = data.get("version")
+        if not isinstance(version, int) or version < 1:
+            return jsonify({"error": "version must be a positive integer"}), 400
+        store = monitor.model_store
+        success = store.rollback(query_id, version)
+        if success:
+            return jsonify({"message": f"Rolled back to v{version}", "version": version})
+        return jsonify({"error": "rollback failed"}), 400
 
     return app
