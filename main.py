@@ -3,6 +3,7 @@ Flight Monitor - Main Entry Point
 Launches the web application and starts the price monitoring engine.
 """
 import logging
+import signal
 import sys
 import os
 
@@ -21,8 +22,19 @@ setup_logging(level="INFO", log_file=os.path.join(LOG_DIR, "flight_monitor.log")
 logger = logging.getLogger("flight_monitor")
 
 
+def _shutdown(signum, frame):
+    """Handle SIGTERM/SIGINT for graceful shutdown."""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    # The finally block in main() will handle cleanup
+    raise SystemExit(0)
+
+
 def main():
     """Start the flight monitor application."""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    
     logger.info("=" * 60)
     logger.info("  Flight Price Monitor - Starting...")
     logger.info("=" * 60)

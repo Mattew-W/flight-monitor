@@ -388,6 +388,27 @@
                     <div class="stats-grid" id="trendStats"></div>
                 </div>
             </div>
+            <div class="card" id="modelInfoCard" style="display:none;">
+                <div class="card-header">
+                    <h3>预测模型信息</h3>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-sm btn-primary" onclick="trainModel()" id="btnTrainModel" aria-label="训练模型">训练模型</button>
+                        <button class="btn btn-sm btn-ghost" onclick="loadModelVersions()" aria-label="刷新模型信息">刷新</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="modelInfoContent"></div>
+                </div>
+            </div>
+            <div class="card" id="modelVersionsCard" style="display:none;">
+                <div class="card-header">
+                    <h3>模型版本历史</h3>
+                    <span class="card-hint" id="modelVersionsHint"></span>
+                </div>
+                <div class="card-body">
+                    <div id="modelVersionsList"></div>
+                </div>
+            </div>
             <div class="card" id="trendFlightsCard" style="display:none;">
                 <div class="card-header">
                     <h3>最新航班价格</h3>

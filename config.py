@@ -11,7 +11,12 @@ from config.loader import get_config
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Database
+# DB_ENGINE: 'sqlite' (default) | 'sqlserver'
+DB_ENGINE = os.environ.get("DB_ENGINE", "sqlite")
 DB_PATH = os.path.join(BASE_DIR, "flight_monitor.db")
+# SQL Server settings (for DB_ENGINE='sqlserver')
+DB_NAME = "flight_monitor"
+DB_SERVER = r".\SQLEXPRESS"
 
 # Flask
 HOST = "127.0.0.1"

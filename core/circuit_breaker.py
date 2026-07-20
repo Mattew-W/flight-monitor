@@ -27,10 +27,14 @@ Usage:
 """
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
+# Use RLock so methods can call each other while holding the lock
+_lock_type = threading.RLock
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +56,7 @@ class CircuitBreakerConfig:
 class CircuitBreaker:
     """Circuit breaker for protecting against repeated failures.
 
-    Thread-safe via simple attribute access (GIL-protected in CPython).
-    For high-concurrency scenarios, add a threading.Lock.
+    Thread-safe via a threading.Lock protecting all state transitions.
     """
 
     def __init__(self, name: str, config: Optional[CircuitBreakerConfig] = None):
@@ -64,43 +67,52 @@ class CircuitBreaker:
         self._success_count = 0
         self._last_failure_time = 0.0
         self._last_state_change = time.time()
+        self._lock = _lock_type()
 
     @property
     def state(self) -> CircuitState:
-        """Current state, with automatic transition from OPEN to HALF_OPEN."""
-        if (self._state == CircuitState.OPEN
-                and time.time() - self._last_failure_time >= self.config.recovery_timeout):
-            self._transition(CircuitState.HALF_OPEN)
-        return self._state
+        """Current state, with automatic transition from OPEN to HALF_OPEN.
+
+        Thread-safe: acquires lock for the duration of the check+transition.
+        """
+        with self._lock:
+            if (self._state == CircuitState.OPEN
+                    and time.time() - self._last_failure_time >= self.config.recovery_timeout):
+                self._transition(CircuitState.HALF_OPEN)
+            return self._state
 
     @property
     def is_open(self) -> bool:
         """True if circuit is open (requests blocked)."""
-        return self.state == CircuitState.OPEN
+        with self._lock:
+            return self.state == CircuitState.OPEN
 
     def can_execute(self) -> bool:
         """Check if a request should be allowed through."""
-        return self.state != CircuitState.OPEN
+        with self._lock:
+            return self.state != CircuitState.OPEN
 
     def record_success(self):
         """Record a successful operation."""
-        if self._state == CircuitState.HALF_OPEN:
-            self._success_count += 1
-            if self._success_count >= self.config.success_threshold:
-                self._transition(CircuitState.CLOSED)
-        elif self._state == CircuitState.CLOSED:
-            self._failure_count = 0  # reset consecutive failures
+        with self._lock:
+            if self._state == CircuitState.HALF_OPEN:
+                self._success_count += 1
+                if self._success_count >= self.config.success_threshold:
+                    self._transition(CircuitState.CLOSED)
+            elif self._state == CircuitState.CLOSED:
+                self._failure_count = 0  # reset consecutive failures
 
     def record_failure(self):
         """Record a failed operation."""
-        self._failure_count += 1
-        self._last_failure_time = time.time()
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
 
-        if self._state == CircuitState.HALF_OPEN:
-            self._transition(CircuitState.OPEN)
-        elif (self._state == CircuitState.CLOSED
-              and self._failure_count >= self.config.failure_threshold):
-            self._transition(CircuitState.OPEN)
+            if self._state == CircuitState.HALF_OPEN:
+                self._transition(CircuitState.OPEN)
+            elif (self._state == CircuitState.CLOSED
+                  and self._failure_count >= self.config.failure_threshold):
+                self._transition(CircuitState.OPEN)
 
     def _transition(self, new_state: CircuitState):
         """Transition to a new state with logging."""
@@ -123,17 +135,19 @@ class CircuitBreaker:
 
     def reset(self):
         """Manually reset to CLOSED state."""
-        self._transition(CircuitState.CLOSED)
+        with self._lock:
+            self._transition(CircuitState.CLOSED)
 
     def get_info(self) -> dict:
         """Return current state info for monitoring."""
-        return {
-            "name": self.name,
-            "state": self.state.value,
-            "failure_count": self._failure_count,
-            "last_failure_time": self._last_failure_time,
-            "last_state_change": self._last_state_change,
-        }
+        with self._lock:
+            return {
+                "name": self.name,
+                "state": self._state.value,
+                "failure_count": self._failure_count,
+                "last_failure_time": self._last_failure_time,
+                "last_state_change": self._last_state_change,
+            }
 
     def __repr__(self) -> str:
         return (

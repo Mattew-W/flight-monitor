@@ -10,7 +10,7 @@ import random
 from typing import List, Optional, Dict, Set
 from datetime import datetime
 from urllib.parse import quote
-from .base import BaseDataSource
+from .base import BaseDataSource, register_source
 from core.models import FlightPrice, SearchQuery
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,7 @@ CITY_TO_CTRIP_ID: Dict[str, tuple] = {
 }
 
 
+@register_source("ctrip_browser")
 class CtripBrowserSource(BaseDataSource):
     """Ctrip flight search via shared async browser pool."""
 

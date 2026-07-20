@@ -68,6 +68,7 @@ class PriceAlert:
     is_active: bool = True
     notify_email: bool = True
     notify_wechat: bool = False
+    notify_feishu: bool = True  # default: auto-send if FEISHU_WEBHOOK config exists
     created_at: str = ""
     last_triggered: str = ""
 

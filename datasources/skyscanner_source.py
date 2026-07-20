@@ -9,7 +9,7 @@ import random
 from datetime import datetime
 from typing import List
 
-from .base import BaseDataSource
+from .base import BaseDataSource, register_source
 from .skyscanner_client import search_flights_skyscanner
 from core.models import FlightPrice, SearchQuery
 
@@ -37,6 +37,7 @@ CITY_TO_IATA = {
 }
 
 
+@register_source("skyscanner")
 class SkyscannerSource(BaseDataSource):
     """Skyscanner data source via public browse API.
 

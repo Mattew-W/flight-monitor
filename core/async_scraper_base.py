@@ -25,6 +25,7 @@ Usage:
 """
 
 import asyncio
+import atexit
 import inspect
 import logging
 import functools
@@ -38,6 +39,19 @@ logger = logging.getLogger(__name__)
 # Shared thread pool for running sync scrapers from async context
 # Avoids creating a new thread per call; bounded to prevent resource exhaustion
 _sync_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="scraper-bridge")
+
+
+def _shutdown_executor():
+    """Gracefully shut down the global thread pool on process exit."""
+    try:
+        _sync_executor.shutdown(wait=False)
+        logger.debug("Global sync_executor shut down cleanly")
+    except Exception as e:
+        logger.warning(f"Error shutting down sync_executor: {e}")
+
+
+# Register shutdown hook so threads don't leak on process exit
+atexit.register(_shutdown_executor)
 
 
 class AsyncScraperBase:

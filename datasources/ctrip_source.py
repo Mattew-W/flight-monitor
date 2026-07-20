@@ -6,13 +6,14 @@ Falls back gracefully if the API is unavailable or blocked.
 import json
 import logging
 from typing import List, Optional
-from .base import BaseDataSource
+from .base import BaseDataSource, register_source
 from core.models import FlightPrice, SearchQuery
 from config import CITY_CODES, CTRIP_API_URL, CTRIP_HEADERS
 
 logger = logging.getLogger(__name__)
 
 
+@register_source("ctrip")
 class CtripDataSource(BaseDataSource):
     """Ctrip (携程) flight data source using public API."""
 
