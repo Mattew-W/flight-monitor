@@ -12,7 +12,7 @@ from typing import List, Optional
 from datetime import datetime
 from urllib.parse import quote, urlencode
 
-from .base import BaseDataSource
+from .base import BaseDataSource, register_source
 from core.models import FlightPrice, SearchQuery
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ except ImportError:
     HAS_REQUESTS = False
 
 
+@register_source("bing")
 class BingSearchSource(BaseDataSource):
     """Bing search-based flight price data source.
 
@@ -58,8 +59,10 @@ class BingSearchSource(BaseDataSource):
             self._session.headers.update(self.HEADERS)
         # In-memory cache for route lookups (flight_no -> result)
         self._route_cache: dict = {}
-        # Negative results cache (flight_no -> True) to skip slow re-searches
-        self._route_negative_cache: set = set()
+        # Negative results cache with TTL (flight_no -> expiry_timestamp)
+        # Default TTL: 24 hours. After expiry, the lookup is retried.
+        self._route_negative_cache: dict = {}  # {fn: expiry_unix_ts}
+        self._negative_cache_ttl = 86400  # 24 hours
         self._route_cache_file = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "data", "bing_route_cache.json"
@@ -70,20 +73,30 @@ class BingSearchSource(BaseDataSource):
         return HAS_REQUESTS
 
     def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
-        """Search Bing for flight prices."""
+        """Search Bing for flight prices.
+
+        Bing now renders prices via JavaScript, so raw HTTP parsing no longer
+        works. We fall back to browser-based search (Playwright headless) which
+        renders the full page including JS-generated content.
+        """
         if not self.is_available():
             return []
 
         results = []
         search_queries = self._build_search_queries(query)
 
-        for sq in search_queries:
+        for sq in search_queries[:2]:  # Max 2 queries to avoid rate limiting
             try:
-                flights = self._search_and_parse(sq, query)
+                # Try browser-based search (primary — handles JS-rendered prices)
+                flights = self._search_via_browser(sq, query)
+                if not flights:
+                    # HTTP parsing is deprecated (Bing no longer has prices in raw HTML)
+                    # but kept as a last resort
+                    flights = self._search_and_parse(sq, query)
                 results.extend(flights)
                 if len(results) >= 20:
                     break
-                time.sleep(1.5)  # Be polite to Bing
+                time.sleep(2)  # Be polite to Bing
             except Exception as e:
                 logger.warning(f"Bing search failed for '{sq}': {e}")
                 continue
@@ -104,6 +117,7 @@ class BingSearchSource(BaseDataSource):
         """Search Bing for flight route info (with caching).
 
         Returns dict with dep_city, arr_city, airline, or empty dict if not found.
+        Negative results are cached for 24 hours, then retried.
         """
         fn = flight_no.strip().upper()
 
@@ -112,15 +126,21 @@ class BingSearchSource(BaseDataSource):
             logger.debug(f"[bing] Route cache hit: {fn}")
             return dict(self._route_cache[fn], _cached=True)
 
-        # 2. Check negative cache (previously not found)
-        if fn in self._route_negative_cache:
-            logger.debug(f"[bing] Route negative cache hit: {fn}")
-            return {}
+        # 2. Check negative cache (skip only if still within TTL)
+        expiry = self._route_negative_cache.get(fn)
+        if expiry is not None:
+            if time.time() < expiry:
+                logger.debug(f"[bing] Route negative cache hit (TTL): {fn}")
+                return {}
+            else:
+                # TTL expired — drop the negative entry and retry
+                logger.info(f"[bing] Negative cache expired, retrying: {fn}")
+                del self._route_negative_cache[fn]
 
         # 3. Cache miss: do the actual browser search
         html = self._browser_search(fn)
         if not html:
-            self._route_negative_cache.add(fn)
+            self._route_negative_cache[fn] = time.time() + self._negative_cache_ttl
             self._save_route_cache()
             return {}
 
@@ -128,19 +148,30 @@ class BingSearchSource(BaseDataSource):
         if result:
             self._route_cache[fn] = result
         else:
-            self._route_negative_cache.add(fn)
+            self._route_negative_cache[fn] = time.time() + self._negative_cache_ttl
         self._save_route_cache()
         return result
 
     def _load_route_cache(self):
-        """Load route cache from disk."""
+        """Load route cache from disk.
+
+        Supports both old format (list of flight_nos) and new format
+        (dict of flight_no -> expiry_timestamp).
+        """
         if not os.path.exists(self._route_cache_file):
             return
         try:
             with open(self._route_cache_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self._route_cache = data.get("positive", {})
-            self._route_negative_cache = set(data.get("negative", []))
+            neg = data.get("negative", [])
+            # Migrate: old format is a list, new format is a dict
+            if isinstance(neg, list):
+                # Old format — treat as long-expired entries (force retry)
+                self._route_negative_cache = {}
+                logger.info(f"[bing] Migrated {len(neg)} legacy negative cache entries to retry")
+            else:
+                self._route_negative_cache = neg
             logger.info(f"[bing] Loaded {len(self._route_cache)} cached routes "
                         f"({len(self._route_negative_cache)} negative)")
         except Exception as e:
@@ -150,41 +181,59 @@ class BingSearchSource(BaseDataSource):
         """Persist route cache to disk (best-effort, non-blocking-ish)."""
         try:
             os.makedirs(os.path.dirname(self._route_cache_file), exist_ok=True)
-            data = {"positive": self._route_cache, "negative": list(self._route_negative_cache)}
+            data = {"positive": self._route_cache, "negative": self._route_negative_cache}
             with open(self._route_cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.debug(f"[bing] Cache save failed: {e}")
 
     def _browser_search(self, flight_no: str) -> Optional[str]:
-        """Use Playwright headless browser to search Bing and return HTML."""
+        """Use Playwright headless browser to search Bing and return HTML.
+
+        Tries multiple query formats in sequence to maximize hit rate.
+        """
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
             logger.warning("Playwright not available for Bing route lookup")
             return None
 
-        query = f"{flight_no} 航班"
-        url = f"{self.BING_SEARCH_URL}?q={quote(query)}"
-        logger.info(f"[bing] Browser searching: {query}")
-
+        # Try multiple query formats — different ones work for different flights
+        queries = [
+            f"{flight_no} 航班",
+            f"{flight_no} 时刻表",
+            f"{flight_no} 航线",
+            f"{flight_no} {flight_no[:2]}航空",
+        ]
+        all_html = []
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-                page = browser.new_page()
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=8000)
-                except Exception:
-                    pass
-                # Wait briefly for results to render
-                try:
-                    page.wait_for_selector("#b_results", timeout=4000)
-                except Exception:
-                    pass
-                time.sleep(0.5)  # Reduced from 1.5s
-                html = page.content()
+                context = browser.new_context(
+                    user_agent=self.HEADERS["User-Agent"],
+                    locale="zh-CN",
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = context.new_page()
+                for query in queries[:2]:  # Limit to 2 queries to save time
+                    try:
+                        url = f"{self.BING_SEARCH_URL}?q={quote(query)}"
+                        logger.info(f"[bing] Browser searching: {query}")
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=8000)
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_selector("#b_results, .b_algo", timeout=4000)
+                        except Exception:
+                            pass
+                        time.sleep(0.4)
+                        all_html.append(page.content())
+                    except Exception as e:
+                        logger.debug(f"[bing] Query '{query}' failed: {e}")
+                        continue
                 browser.close()
-                return html
+                return "\n".join(all_html) if all_html else None
         except Exception as e:
             logger.warning(f"[bing] Browser search failed: {e}")
             return None
@@ -192,25 +241,26 @@ class BingSearchSource(BaseDataSource):
     def _parse_route_html(self, html: str, flight_no: str) -> dict:
         """Parse Bing search HTML to extract flight route cities.
 
-        Uses Playwright element-level extraction for precision, then regex
-        fallback on cleaned text.
+        Uses multiple strategies in priority order:
+        1. Direct regex: flight_no followed by "city1 SEPARATOR city2"
+        2. Two known cities near any flight_no occurrence
+        3. Reverse: city1 SEPARATOR city2 near any flight_no occurrence
         """
-        # --- Approach 1: structured search in DOM-like text ---
-        # Remove JS/CSS, extract only visible text
+        # --- Pre-process HTML into plain text ---
         text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
-        # Extract text from between tags
         text = re.sub(r'<[^>]+>', ' ', text)
         text = re.sub(r'&[a-z]+;', ' ', text, flags=re.IGNORECASE)  # HTML entities
         text = re.sub(r'\s+', ' ', text).strip()
 
-        # Known Chinese city suffixes for filtering
-        city_suffixes = r'(?:市|县|区)?'
+        # Expanded separator set: includes Chinese arrows, "to" variants, English dash, slash
+        SEP = r'[\s]*[—–→➡到至飞\->\/]+[\s]*'
 
-        # Pattern: flight_no followed by route within 150 chars
-        # e.g. "...ZH9103 航班查询_深圳到北京 飞机..."
-        pat = re.escape(flight_no) + r'.{0,150}?'
+        # --- Strategy 1: structured regex (widened window) ---
+        # e.g. "...ZH9103 航班查询_深圳到北京 飞机..." or "MU6950 上海 - 北京"
+        # Window: 200 chars to allow more intervening context
+        pat = re.escape(flight_no) + r'.{0,200}?'
         pat += r'([\u4e00-\u9fff]{2,4})'  # city 1
-        pat += r'\s*[—–→➡到至飞]\s*'       # separator (no plain dash)
+        pat += SEP
         pat += r'([\u4e00-\u9fff]{2,4})'   # city 2
 
         for m in re.finditer(pat, text):
@@ -218,7 +268,7 @@ class BingSearchSource(BaseDataSource):
             if c1 != c2 and not self._is_noise_city(c1) and not self._is_noise_city(c2):
                 return self._make_result(flight_no, c1, c2)
 
-        # --- Approach 2: find city cities near any flight_no occurrence ---
+        # --- Strategy 2: known cities near any flight_no occurrence ---
         known_cities = [
             "北京", "上海", "广州", "深圳", "成都", "西安", "杭州",
             "南京", "厦门", "武汉", "长沙", "重庆", "昆明", "贵阳",
@@ -226,13 +276,26 @@ class BingSearchSource(BaseDataSource):
             "哈尔滨", "长春", "济南", "石家庄", "乌鲁木齐", "拉萨",
             "合肥", "南昌", "福州", "南宁", "银川", "西宁", "兰州",
             "呼和浩特", "太原", "香港", "澳门", "台北",
+            "高雄", "台中", "宁波", "温州", "无锡", "烟台", "泉州",
+            "珠海", "汕头", "湛江", "桂林", "北海", "秦皇岛",
+            "张家界", "黄山", "九寨沟", "丽江", "腾冲", "大理",
         ]
-        # Find flight_no positions
+        # Find flight_no positions and look in a wider context window (400 chars)
         for m in re.finditer(re.escape(flight_no), text):
-            ctx = text[m.start():m.start() + 300]
+            ctx = text[max(0, m.start() - 50):m.start() + 400]
             found_cities = [c for c in known_cities if c in ctx]
             if len(found_cities) >= 2:
                 return self._make_result(flight_no, found_cities[0], found_cities[1])
+
+        # --- Strategy 3: search for any "city SEP city" pattern in entire text,
+        #     then check if flight_no is in the same page ---
+        city_pair_pat = r'([\u4e00-\u9fff]{2,4})' + SEP + r'([\u4e00-\u9fff]{2,4})'
+        if re.search(re.escape(flight_no), text):
+            for m in re.finditer(city_pair_pat, text):
+                c1, c2 = m.group(1), m.group(2)
+                if c1 != c2 and not self._is_noise_city(c1) and not self._is_noise_city(c2):
+                    if c1 in known_cities and c2 in known_cities:
+                        return self._make_result(flight_no, c1, c2)
 
         return {}
 
@@ -256,7 +319,7 @@ class BingSearchSource(BaseDataSource):
         return False
 
     def _make_result(self, flight_no: str, dep_city: str, arr_city: str) -> dict:
-        """Build result dict with airline guessing."""
+        """Build result dict with airline guessing and airport code lookup."""
         airline_map = {
             "CA": "中国国航", "MU": "东方航空", "CZ": "南方航空",
             "HU": "海南航空", "ZH": "深圳航空", "MF": "厦门航空",
@@ -264,8 +327,22 @@ class BingSearchSource(BaseDataSource):
         }
         prefix = flight_no[:2]
         airline = airline_map.get(prefix, prefix)
-        logger.info(f"[bing] Route found: {flight_no} = {dep_city} -> {arr_city}")
-        return {"dep_city": dep_city, "arr_city": arr_city, "airline": airline}
+
+        # Look up IATA airport codes for the cities
+        try:
+            from config import get_config
+            cfg = get_config()
+            dep_airport = cfg.city_codes.get(dep_city, "")
+            arr_airport = cfg.city_codes.get(arr_city, "")
+        except Exception:
+            dep_airport = ""
+            arr_airport = ""
+
+        logger.info(f"[bing] Route found: {flight_no} = {dep_city}({dep_airport}) -> {arr_city}({arr_airport})")
+        return {
+            "dep_city": dep_city, "arr_city": arr_city, "airline": airline,
+            "dep_airport": dep_airport, "arr_airport": arr_airport,
+        }
 
     def _build_search_queries(self, query: SearchQuery) -> List[str]:
         """Build multiple search queries for better coverage."""
@@ -279,6 +356,96 @@ class BingSearchSource(BaseDataSource):
             f"机票 {dep}→{arr} {date} 携程 去哪儿",
             f"site:flights.ctrip.com {dep} {arr} {date}",
         ]
+
+    def _search_via_browser(self, search_query: str, original_query: SearchQuery) -> List[FlightPrice]:
+        """Use browser automation to get JS-rendered prices from Bing.
+
+        Bing now renders flight prices via JavaScript after page load.
+        Headless Playwright renders the full page, then we extract
+        price data directly from the DOM via page.evaluate().
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            logger.debug("Playwright not available for Bing browser search")
+            return []
+
+        url = f"{self.BING_SEARCH_URL}?q={quote(search_query)}&setlang=zh-CN&count=30"
+        logger.info(f"[bing] Browser searching: {search_query[:60]}...")
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+                context = browser.new_context(
+                    user_agent=self.HEADERS["User-Agent"],
+                    locale="zh-CN",
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = context.new_page()
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                # Wait for results to render
+                try:
+                    page.wait_for_selector("#b_results .b_algo, #b_results [class*='flight'], [data-escape-type]", timeout=8000)
+                except Exception:
+                    pass
+                time.sleep(2)  # Extra wait for JS-rendered prices
+
+                # Extract flight data from DOM via JavaScript evaluation
+                flight_data = page.evaluate("""() => {
+                    const results = [];
+                    const seen = new Set();
+                    // Common Bing selectors for flight-related content
+                    const items = document.querySelectorAll(
+                        '.b_algo, [class*="flight"], [class*="pricecard"], [class*="flightcard"], [data-escape-type], .b_caption'
+                    );
+                    for (const item of items) {
+                        const text = item.innerText || '';
+                        // Find flight numbers (e.g. MU1234, CA123)
+                        const flights = text.match(/[A-Z]{2}\\d{2,4}/g) || [];
+                        // Find prices (e.g. ¥1234, ￥1234, 1234元)
+                        const prices = text.match(/(?:¥|￥)\\s*(\\d{3,5})/g) || [];
+                        const yuanPrices = text.match(/(\\d{3,5})\\s*(?:元|块钱)/g) || [];
+                        const allPrices = [
+                            ...prices.map(p => parseInt(p.replace(/[¥￥\\s]/g, ''))),
+                            ...yuanPrices.map(p => parseInt(p.replace(/[元块钱\\s]/g, ''))),
+                        ].filter(p => p >= 100 && p <= 50000);
+
+                        for (const fn of flights) {
+                            for (const pr of allPrices) {
+                                const key = fn + '_' + pr;
+                                if (!seen.has(key)) {
+                                    seen.add(key);
+                                    results.push({flight_no: fn, price: pr});
+                                }
+                            }
+                        }
+                    }
+                    return results;
+                }""")
+                browser.close()
+
+                flights = []
+                now = datetime.now().isoformat()
+                for fd in flight_data:
+                    flights.append(FlightPrice(
+                        flight_no=fd["flight_no"],
+                        departure=original_query.departure,
+                        destination=original_query.destination,
+                        departure_date=original_query.departure_date,
+                        price=float(fd["price"]),
+                        cabin_class="economy",
+                        source="bing",
+                        timestamp=now,
+                    ))
+
+                logger.info(f"[bing] Browser found {len(flights)} flights for {original_query.departure}->{original_query.destination}")
+                return flights
+        except Exception as e:
+            logger.warning(f"[bing] Browser search failed: {e}")
+            return []
 
     def _search_and_parse(self, search_query: str, original_query: SearchQuery) -> List[FlightPrice]:
         """Execute Bing search and parse results for flight prices."""

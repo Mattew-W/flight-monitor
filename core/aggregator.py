@@ -161,12 +161,17 @@ class FlightAggregator:
 
     @staticmethod
     def _group_and_aggregate(all_prices: list, real_flights: list, mock_flights: list) -> tuple:
-        """O(N) hash grouping with depth aggregation. Returns (grouped_flights, min_price, all_platforms)."""
+        """O(N) hash grouping with depth aggregation. Returns (grouped_flights, min_price, all_platforms).
+
+        Groups by (airline, flight_no) only — not departure_time.  This prevents
+        fragmenting the same flight into multiple groups when different sources
+        return different or empty departure_time values.
+        """
         _real_sources: Dict[tuple, set] = defaultdict(set)
         for p in real_flights:
-            _real_sources[(p.airline, p.flight_no, p.departure_time)].add(p.source)
+            _real_sources[(p.airline, p.flight_no)].add(p.source)
         for p in mock_flights:
-            fn_key = (p.airline, p.flight_no, p.departure_time)
+            fn_key = (p.airline, p.flight_no)
             if fn_key in _real_sources:
                 _real_sources[fn_key].add(p.source)
 
@@ -175,7 +180,7 @@ class FlightAggregator:
         platforms = set()
 
         for p in all_prices:
-            key = (p.airline, p.flight_no, p.departure_time)
+            key = (p.airline, p.flight_no)
             min_price = min(min_price, p.price)
             platforms.add(p.source)
 
@@ -192,6 +197,23 @@ class FlightAggregator:
                     "price": p.price, "purchase_url": p.purchase_url,
                     "source": p.source, "platform_prices": {},
                 }
+            else:
+                # Merge: prefer the entry with the most complete time info
+                existing = grouped[key]
+                if p.departure_time and existing.get("departure_time") in ("时间待定", "", None):
+                    # Upgrade from "时间待定" to actual time
+                    existing["departure_time"] = p.departure_time
+                    if p.arrival_time:
+                        existing["arrival_time"] = p.arrival_time
+                    if p.duration:
+                        existing["duration"] = p.duration
+                    if p.aircraft and existing.get("aircraft") in ("未知机型", ""):
+                        existing["aircraft"] = p.aircraft
+                        existing["aircraft_details"] = FlightAggregator._get_aircraft_details(p.aircraft)
+                    if p.departure_airport:
+                        existing["departure_airport"] = p.departure_airport
+                    if p.arrival_airport:
+                        existing["arrival_airport"] = p.arrival_airport
 
             if p.price < grouped[key]["price"]:
                 grouped[key]["price"] = p.price
@@ -216,30 +238,9 @@ class FlightAggregator:
 
     @staticmethod
     def _dedup_and_sort(grouped: dict) -> list:
-        """Deduplicate by flight_no and sort by price."""
-        deduped = {}
-        for flight in grouped.values():
-            mk = (flight["airline"], flight["flight_no"])
-            if mk not in deduped:
-                deduped[mk] = flight
-            else:
-                e = deduped[mk]
-                if flight.get("departure_time") and flight["departure_time"] not in ("时间待定", ""):
-                    if not e.get("departure_time") or e["departure_time"] in ("时间待定", ""):
-                        for attr in ("departure_time", "arrival_time", "aircraft",
-                                     "duration", "departure_airport", "arrival_airport",
-                                     "aircraft_details"):
-                            if flight.get(attr):
-                                e[attr] = flight[attr]
-                sp = {x["source"] for x in e["platform_prices"].values()}
-                for pf in flight["platform_prices"].values():
-                    if pf["source"] not in sp:
-                        e["platform_prices"][pf["source"]] = pf
-                if flight["price"] < e["price"]:
-                    e["price"] = flight["price"]
-
+        """Sort grouped flights by price. Grouping already unique by (airline, flight_no)."""
         final = []
-        for flight in deduped.values():
+        for flight in grouped.values():
             plat_list = sorted(flight["platform_prices"].values(), key=lambda x: x["price"])
             flight["platform_prices"] = plat_list[:8]
             final.append(flight)
@@ -255,36 +256,39 @@ class FlightAggregator:
 
         plat_keys = FlightAggregator._get_platform_keys(query.departure, query.destination)
 
-        # Separate data sources
-        real_flights = [p for p in raw_prices if p.source == "ctrip_browser"]
-        mock_flights = [p for p in raw_prices if p.source != "ctrip_browser"]
+        # Separate real data from mock data
+        # Real: any actual crawler source (ctrip_browser, ctrip, multi-platform, etc.)
+        # Mock: only the mock source generates synthetic data
+        real_flights = [p for p in raw_prices if p.source != "mock"]
+        mock_flights = [p for p in raw_prices if p.source == "mock"]
 
-        if real_flights:
-            real_by_flightno = defaultdict(list)
-            seen_platforms = defaultdict(set)
-            for p in real_flights:
-                FlightAggregator._backfill_flight_data(p)
-                fn_key = (p.airline, p.flight_no)
-                real_by_flightno[fn_key].append(p)
+        # Backfill flight data
+        for p in real_flights:
+            FlightAggregator._backfill_flight_data(p)
+        for p in mock_flights:
+            FlightAggregator._backfill_flight_data(p)
+            p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
+
+        # Aggregate all platforms from real data
+        seen_platforms = defaultdict(set)
+        real_by_flightno = defaultdict(list)
+        for p in real_flights:
+            fn_key = (p.airline, p.flight_no)
+            real_by_flightno[fn_key].append(p)
+            seen_platforms[fn_key].add(p.source)
+
+        # Keep mock that match real flight numbers (cross-platform comparison)
+        matched_mock = []
+        for p in mock_flights:
+            fn_key = (p.airline, p.flight_no)
+            if fn_key in real_by_flightno:
+                matched_mock.append(p)
                 seen_platforms[fn_key].add(p.source)
 
-            # Keep only mock flights matching real flight numbers
-            matched_mock = []
-            for p in mock_flights:
-                fn_key = (p.airline, p.flight_no)
-                if fn_key in real_by_flightno:
-                    matched_mock.append(p)
-                    seen_platforms[fn_key].add(p.source)
-
-            all_prices = real_flights + matched_mock
-            extra = FlightAggregator._generate_estimated_prices(
-                real_flights, matched_mock, seen_platforms, plat_keys, query)
-            all_prices.extend(extra)
-        else:
-            for p in mock_flights:
-                FlightAggregator._backfill_flight_data(p)
-                p.aircraft = p.aircraft or get_aircraft_for_flight(p.flight_no)
-            all_prices = mock_flights
+        all_prices = real_flights + matched_mock
+        extra = FlightAggregator._generate_estimated_prices(
+            real_flights, matched_mock, seen_platforms, plat_keys, query)
+        all_prices.extend(extra)
 
         grouped, min_price, platforms = FlightAggregator._group_and_aggregate(
             all_prices, real_flights, mock_flights)

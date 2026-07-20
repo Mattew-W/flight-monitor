@@ -1,33 +1,64 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Flight Monitor
+set PYTHONIOENCODING=utf-8
+title Flight Monitor Server Starter
 cd /d "%~dp0"
 
-set PY=python
-where python >nul 2>&1
-if errorlevel 1 (
-    if exist ".venv\Scripts\python.exe" set PY=.venv\Scripts\python.exe
+:: ---- Resolve Python interpreter ----
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    set "PY=python"
+    where python >nul 2>&1 || (
+        echo [FATAL] Python not found!
+        pause
+        exit /b 1
+    )
 )
 
 echo ============================================
-echo   Flight Monitor - Starting...
+echo   Flight Monitor - Starting Server
 echo ============================================
 echo.
 echo   http://127.0.0.1:5566
 echo ============================================
 echo.
 
-rem -- Start server in background --
-echo Set WshShell = CreateObject("WScript.Shell") > _s.vbs
-echo WshShell.Run "%PY% main.py", 0, False >> _s.vbs
-cscript //nologo _s.vbs & del _s.vbs
+:: ---- Kill any existing server ----
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]"') do (
+    echo Stopping old server [PID: %%a]...
+    taskkill /PID %%a /F >nul 2>&1
+)
 
-rem -- Wait for server to start --
-timeout /t 3 >nul
+:: ---- Launch server in a new window ----
+start "Flight Monitor Server" "%PY%" main.py
 
-rem -- Open browser --
+echo Waiting for server to start...
+timeout /t 5 /nobreak >nul 2>&1
+
+netstat -ano 2>nul | findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo [WARN] Server may not have started. Check the server window.
+) else (
+    echo.
+    echo [OK] Server running at http://127.0.0.1:5566
+)
+
+:: ---- Open browser ----
 start "" http://127.0.0.1:5566
 
-echo Done! Server running in background.
-echo Close this window or press any key...
+echo.
+echo Close this window to stop the server launcher.
+echo (The server runs in its own window.)
+echo.
+echo To stop server, close the server window, or use
+echo   flight_monitor_console.bat ^> option [5]
+echo.
 pause >nul
+
+:: ---- Cleanup on exit ----
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]"') do (
+    taskkill /PID %%a /F >nul 2>&1
+)
+
+exit /b 0

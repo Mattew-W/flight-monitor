@@ -4,10 +4,15 @@ set PYTHONIOENCODING=utf-8
 title Flight Monitor - City Matrix Mode
 cd /d "%~dp0"
 
-set PY=python
-where python >nul 2>&1
-if errorlevel 1 (
-    if exist ".venv\Scripts\python.exe" set PY=.venv\Scripts\python.exe
+:: ---- Resolve Python interpreter ----
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    set "PY=python"
+    where python >nul 2>&1 || (
+        echo [FATAL] Python not found!
+        pause
+        exit /b 1
+    )
 )
 
 echo ============================================
@@ -23,20 +28,26 @@ echo.
 echo ============================================
 echo.
 
-set /p mode=Select mode: [1]Headed(auto-CAPTCHA) [2]Headless: 
-if "%mode%"=="" set mode=1
+choice /c 12 /n /m "Select mode: [1]Headed(auto-CAPTCHA) [2]Headless: "
+set "MODE=%errorlevel%"
 
-set /p delay=Enter delay between searches in sec (default 3.0): 
-if "%delay%"=="" set delay=3.0
+set /p "delay=Enter delay between searches in sec (default 3.0): "
+if "%delay%"=="" set "delay=3.0"
 
 echo.
-echo Starting city matrix collection...
+echo Starting city matrix collection ...
 echo.
 
-if "%mode%" equ "1" (
-    %PY% tools\collect_real.py --full-matrix -d %delay% --monitor --headed
+if "%MODE%"=="1" (
+    "%PY%" tools\collect_real.py --full-matrix -d %delay% --monitor --headed
 ) else (
-    %PY% tools\collect_real.py --full-matrix -d %delay% --monitor
+    "%PY%" tools\collect_real.py --full-matrix -d %delay% --monitor
+)
+if errorlevel 1 (
+    echo.
+    echo [ERROR] collect_real.py failed.
+    pause
+    exit /b 1
 )
 
 echo.
@@ -45,3 +56,4 @@ echo   Done!
 echo ============================================
 echo.
 pause
+exit /b 0

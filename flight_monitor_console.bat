@@ -1,117 +1,167 @@
 @echo off
+chcp 65001 >nul 2>&1
+set PYTHONIOENCODING=utf-8
+title Flight Monitor Console
 cd /d "%~dp0"
 
-set PY=python
-where python 2>nul
-if errorlevel 1 (
-    if exist ".venv\Scripts\python.exe" (
-        set PY=.venv\Scripts\python.exe
+:: ---- Resolve Python interpreter ----
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    set "PY=python"
+    where python >nul 2>&1 || (
+        echo [FATAL] Python not found. Please install Python 3.10+ first.
+        pause
+        exit /b 1
     )
 )
 
-::MENU
+:MENU
 cls
 echo.
-echo  ============================================
-echo     FLIGHT MONITOR CONSOLE
-echo  ============================================
-echo   1. Start Server + Open Browser
-echo   2. Collect Mock Data
-echo   3. Collect Real Data (Ctrip)
-echo   4. Collect Real Data (Headed/CAPTCHA)
-echo   5. Stop All Services
-echo   6. Check Status
-echo   0. Exit
-echo  ============================================
+echo   ============================================
+echo        F L I G H T   M O N I T O R
+echo   ============================================
 echo.
-set choice=
-set /p choice=Select [0-6]: 
+echo     1. Start Server       (port 5566)
+echo     2. Collect MOCK Data  (fast, for testing)
+echo     3. Collect REAL Data  (Ctrip headless)
+echo     4. Collect REAL Data  (Headed ^| CAPTCHA)
+echo     5. Stop Server
+echo     6. Check Status
+echo.
+echo     0. Exit
+echo.
+echo   ============================================
 
-if "%choice%" equ "1" goto START
-if "%choice%" equ "2" goto COLLECT
-if "%choice%" equ "3" goto REALCOLLECT
-if "%choice%" equ "4" goto HEADEDCOLLECT
-if "%choice%" equ "5" goto STOP
-if "%choice%" equ "6" goto STATUS
-if "%choice%" equ "0" goto EXIT
-echo Invalid option
+choice /c 1234560 /n /m "   Select [0-6]: "
+if errorlevel 7 goto :EXIT
+if errorlevel 6 goto :STATUS
+if errorlevel 5 goto :STOP
+if errorlevel 4 goto :HEADEDCOLLECT
+if errorlevel 3 goto :REALCOLLECT
+if errorlevel 2 goto :COLLECT
+if errorlevel 1 goto :START
+goto :MENU
+
+:START
+echo.
+echo   Starting server...
+echo.
+:: Kill any existing listener on :5566
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]"') do (
+    echo   ^| old server PID=%%a, killing...
+    taskkill /PID %%a /F >nul 2>&1
+)
+cd /d "%~dp0"
+start "" "%PY%" main.py
+echo.
+echo   Waiting for server to start ...
+timeout /t 5 /nobreak >nul 2>&1
+netstat -ano 2>nul | findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]" >nul 2>&1
+if errorlevel 1 (
+    echo   [WARN] Server may not have started. Check the server window.
+) else (
+    echo   [OK] Server running at http://127.0.0.1:5566
+    echo.
+    echo   Opening browser ...
+    start "" http://127.0.0.1:5566
+)
+echo.
+echo   Use [5] to stop the server.
+echo.
 pause
-goto MENU
+goto :MENU
 
-::START
+:COLLECT
 echo.
-echo Starting server in background...
+echo   Collecting MOCK data ...
 echo.
-start /b "" %PY% main.py
-
-echo Waiting for server to start...
-ping -n 5 127.0.0.1 >nul
-
-start http://127.0.0.1:5566
+"%PY%" tools\seed_data.py --mock-only -w 16
+if errorlevel 1 (
+    echo.
+    echo   [ERROR] seed_data.py failed ^(exit code !errorlevel!^)
+    pause
+    goto :MENU
+)
 echo.
-echo ============================================
-echo   Server running on http://127.0.0.1:5566
-echo   Use [5] to stop all services
-echo ============================================
+"%PY%" tools\backfill_history.py
+if errorlevel 1 (
+    echo.
+    echo   [ERROR] backfill_history.py failed
+    pause
+    goto :MENU
+)
 echo.
+echo   [DONE] Mock data ready.
 pause
-goto MENU
+goto :MENU
 
-::COLLECT
+:REALCOLLECT
 echo.
-echo Collecting MOCK data...
+echo   Collecting REAL data from Ctrip ...
 echo.
-%PY% tools\seed_data.py --mock-only -w 16
-%PY% tools\backfill_history.py
+"%PY%" tools\collect_real.py -n 5 -d 2.0 --monitor
+if errorlevel 1 (
+    echo.
+    echo   [ERROR] collect_real.py failed
+    pause
+    goto :MENU
+)
 echo.
-echo Done.
+echo   [DONE] Real data saved.
 pause
-goto MENU
+goto :MENU
 
-::REALCOLLECT
+:HEADEDCOLLECT
 echo.
-echo Collecting REAL data from Ctrip...
+echo   Collecting REAL data (Headed Mode - CAPTCHA) ...
 echo.
-%PY% tools\collect_real.py -n 5 -d 2.0 --monitor
+"%PY%" tools\collect_real.py -n 3 -d 3.0 --monitor --headed
+if errorlevel 1 (
+    echo.
+    echo   [ERROR] collect_real.py failed
+    pause
+    goto :MENU
+)
 echo.
-echo Done.
+echo   [DONE] Real data saved.
 pause
-goto MENU
+goto :MENU
 
-::HEADEDCOLLECT
+:STOP
 echo.
-echo Collecting REAL data (Headed Mode - Manual CAPTCHA)...
+echo   Stopping server ...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]"') do (
+    echo   ^| killing PID=%%a
+    taskkill /PID %%a /F >nul 2>&1
+)
 echo.
-echo A browser window will open. Solve CAPTCHA when it appears.
-echo.
-%PY% tools\collect_real.py -n 3 -d 3.0 --monitor --headed
-echo.
-echo Done.
+echo   [DONE]
 pause
-goto MENU
+goto :MENU
 
-::STOP
+:STATUS
 echo.
-echo Stopping all services...
+echo   Status:
 echo.
-taskkill /f /im python.exe 2>nul
-taskkill /f /im chrome.exe 2>nul
-taskkill /f /im chromedriver.exe 2>nul
+netstat -ano 2>nul | findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]" >nul 2>&1
+if errorlevel 1 (
+    echo     Server  : NOT RUNNING
+) else (
+    echo     Server  : RUNNING
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]"') do (
+        echo     PID   : %%a
+    )
+)
 echo.
-echo Done.
-pause
-goto MENU
-
-::STATUS
-echo.
-echo Status:
-echo.
-netstat -ano 2>nul | find ":5566"
+echo   Python processes:
 tasklist 2>nul | find /i "python" | find /v "find"
 echo.
 pause
-goto MENU
+goto :MENU
 
-::EXIT
-echo Bye.
+:EXIT
+echo.
+echo   Bye!
+timeout /t 1 /nobreak >nul 2>&1
 exit /b 0
