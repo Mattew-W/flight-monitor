@@ -562,7 +562,9 @@ async function doQuickPredict(e) {
         }
         flightInfo = {
             found: true,
-            airline: fn,
+            // Use airline name from the hint (e.g. "东方航空"), NOT the flight
+            // number — otherwise the title renders "MU6950 MU6950".
+            airline: (quickFlightData && quickFlightData.airline) || fn,
             flight_no: fn,
             dep_city: departure,
             arr_city: destination,

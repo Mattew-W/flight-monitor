@@ -55,17 +55,27 @@ for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /r /c:":5566 .*[Ll][Ii
 cd /d "%~dp0"
 start "" "%PY%" main.py
 echo.
-echo   Waiting for server to start ...
-timeout /t 5 /nobreak >nul 2>&1
+echo   Waiting for server to become ready ...
+set /a TRIES=0
+:WAITLOOP
+set /a TRIES+=1
+if %TRIES% GTR 60 (
+    echo.
+    echo   [WARN] Server did not start within 60s. Check the server window.
+    goto :STARTDONE
+)
 netstat -ano 2>nul | findstr /r /c:":5566 .*[Ll][Ii][Ss][Tt][Ee][Nn]" >nul 2>&1
 if errorlevel 1 (
-    echo   [WARN] Server may not have started. Check the server window.
-) else (
-    echo   [OK] Server running at http://127.0.0.1:5566
-    echo.
-    echo   Opening browser ...
-    start "" http://127.0.0.1:5566
+    <nul set /p"=."
+    timeout /t 1 /nobreak >nul 2>&1
+    goto :WAITLOOP
 )
+echo.
+echo   [OK] Server ready at http://127.0.0.1:5566 (took ~%TRIES%s)
+echo.
+echo   Opening browser ...
+start "" http://127.0.0.1:5566
+:STARTDONE
 echo.
 echo   Use [5] to stop the server.
 echo.

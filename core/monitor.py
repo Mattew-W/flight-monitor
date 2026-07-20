@@ -67,7 +67,11 @@ class _AsyncEventLoopThread:
     def run(self, coro):
         """Submit a coroutine to the event loop and block until done."""
         if self._loop is None:
-            raise RuntimeError("Event loop thread not started")
+            # Lazy-start: allows search_once() etc. to work even when the
+            # monitor loop was never started (no monitoring queries at boot).
+            self.start()
+        if self._loop is None:
+            raise RuntimeError("Event loop thread failed to start")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=120)
 

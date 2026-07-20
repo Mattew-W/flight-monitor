@@ -29,27 +29,41 @@ def _shutdown(signum, frame):
     raise SystemExit(0)
 
 
+def _progress(step: int, total: int, msg: str):
+    """Print a simple startup progress bar to the console."""
+    filled = int(30 * step / total)
+    bar = "█" * filled + "░" * (30 - filled)
+    print(f"\r  [{bar}] {step}/{total} {msg}", end="", flush=True)
+    if step == total:
+        print()  # newline at 100%
+
+
 def main():
     """Start the flight monitor application."""
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
-    
+
+    TOTAL = 5
     logger.info("=" * 60)
     logger.info("  Flight Price Monitor - Starting...")
     logger.info("=" * 60)
 
+    _progress(1, TOTAL, "初始化数据库...")
     # Initialize database
     db = Database(DB_PATH)
     logger.info(f"Database initialized: {DB_PATH}")
 
+    _progress(2, TOTAL, "初始化监控引擎（加载数据源）...")
     # Initialize monitor
     monitor = PriceMonitor(db)
     logger.info(f"Data sources: {list(monitor.sources.keys())}")
 
+    _progress(3, TOTAL, "创建 Web 服务...")
     # Create Flask app
     app = create_app(db, monitor)
 
+    _progress(4, TOTAL, "检查监控任务...")
     # Auto-start monitor if there are monitoring queries
     monitoring_queries = db.get_monitoring_queries()
     if monitoring_queries:
@@ -58,6 +72,7 @@ def main():
     else:
         logger.info("No monitoring queries found. Monitor will start when you add tasks.")
 
+    _progress(5, TOTAL, "启动完成！")
     # Run Flask
     logger.info(f"Web UI: http://{HOST}:{PORT}")
     logger.info("Press Ctrl+C to stop.")
