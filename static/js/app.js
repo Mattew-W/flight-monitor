@@ -1528,8 +1528,10 @@ async function bingSearchFlight(queryId) {
             // Update summary count
             const countEl = document.querySelector(".search-summary-count");
             if (countEl) countEl.textContent = `共 ${existingCount + r.flights.length} 个航班 (含 ${r.flights.length} 条 Bing 结果)`;
-            // Re-apply filters to include new results
-            currentSearchResults = result;
+            // Merge Bing results into the shared result set so applyFilters works
+            if (currentSearchResults && currentSearchResults.flights) {
+                currentSearchResults.flights.push(...r.flights);
+            }
             applyFilters();
             toast(`Bing 搜索完成，新增 ${r.flights.length} 条结果`, "success");
         } else {
@@ -1831,10 +1833,10 @@ function renderTrendFlights(prices) {
                     const info = getPlatformInfo(f.source);
                     return `
                     <tr>
-                        <td><span class="airline-badge">${f.airline}</span></td>
-                        <td>${f.flight_no}</td>
-                        <td>${f.departure_time}<br><small style="color:var(--text-muted);">${f.departure_airport}</small></td>
-                        <td>${f.arrival_time}<br><small style="color:var(--text-muted);">${f.arrival_airport}</small></td>
+                        <td><span class="airline-badge">${escapeHTML(f.airline)}</span></td>
+                        <td>${escapeHTML(f.flight_no)}</td>
+                        <td>${escapeHTML(f.departure_time)}<br><small style="color:var(--text-muted);">${escapeHTML(f.departure_airport)}</small></td>
+                        <td>${escapeHTML(f.arrival_time)}<br><small style="color:var(--text-muted);">${escapeHTML(f.arrival_airport)}</small></td>
                         <td>${escapeHTML(f.duration)}</td>
                         <td><span class="stops-badge ${f.stops === 0 ? 'direct' : 'transfer'}">${f.stops === 0 ? '直飞' : f.stops + '中转'}</span></td>
                         <td class="price-cell">¥${Math.round(f.price)}</td>

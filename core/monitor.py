@@ -82,6 +82,7 @@ class _AsyncEventLoopThread:
             self._thread.join(timeout=5)
             self._thread = None
             self._loop = None
+        self._started.clear()  # allow restart
 
 
 class _NotifyWorker:
@@ -299,11 +300,12 @@ class PriceMonitor:
             self._thread = None
         # Now safe to stop workers (no new tasks will arrive).
         self._notify_worker.stop()
-        self._async_loop.stop()
-        # Shut down the monitor thread pool (if any) to avoid thread leaks.
-        if hasattr(self, "_pool"):
-            self._pool.shutdown(wait=False)
+        # Shut down pool workers FIRST (they may be blocking in async_loop.run,
+        # future.result with 120s timeout). Then stop the event loop.
+        if getattr(self, "_pool", None) is not None:
+            self._pool.shutdown(wait=True)
             self._pool = None
+        self._async_loop.stop()
         logger.info("Price monitor stopped")
 
     def _run_loop(self):
@@ -319,7 +321,8 @@ class PriceMonitor:
         # Reuse a fixed worker pool across cycles instead of creating a new
         # ThreadPoolExecutor each period. Per-cycle creation leaks thread-local
         # SQLite connections (they linger in db._all_conns after the thread dies).
-        if not hasattr(self, "_pool"):
+        # NOTE: use getattr (not hasattr) — stop() sets _pool=None on shutdown.
+        if getattr(self, "_pool", None) is None:
             self._pool = ThreadPoolExecutor(max_workers=self.max_workers,
                                             thread_name_prefix="monitor")
 

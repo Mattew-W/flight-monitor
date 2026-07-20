@@ -742,7 +742,9 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
             from datasources.flight_schedules import lookup_flight_schedule
         except ImportError:
             return jsonify({"found": False, "error": "schedule db not available"}), 501
-        sched = lookup_flight_schedule(flight_no)
+        # Copy to avoid mutating the shared FLIGHT_SCHEDULES dict in-place.
+        sched_raw = lookup_flight_schedule(flight_no.upper())
+        sched = dict(sched_raw) if sched_raw else None
         if sched:
             # Only return found=true when we have usable city info
             sched["flight_no"] = flight_no.upper()

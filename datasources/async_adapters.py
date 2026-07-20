@@ -54,13 +54,11 @@ class AsyncMultiPlatformScraper(AsyncBrowserScraperBase):
         if pool is None:
             return []
 
-        ctx = await pool.acquire(self.name)
-        if ctx is None:
+        page = await pool.new_page(self.name)
+        if page is None:
             return []
 
-        page = None
         try:
-            page = await ctx.new_page()
             # Use the sync scraper's URL builder and extraction logic
             url = self._sync_scraper.url_builder(
                 query.departure, query.destination, query.departure_date
@@ -86,12 +84,7 @@ class AsyncMultiPlatformScraper(AsyncBrowserScraperBase):
             logger.error(f"[{self.name}] scrape error: {e}")
             return []
         finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-            await pool.release()
+            await pool.close_page(page)
 
 
 # ── AirlineSnifferSource Async Adapter ─────────────────────────
@@ -130,11 +123,10 @@ class AsyncAirlineSnifferSource(AsyncBrowserScraperBase):
         arr_code = city_map.get(query.destination, query.destination)
         url = cfg["search_url"].format(dep=dep_code, arr=arr_code, date=query.departure_date)
 
-        ctx = await pool.acquire(self._sync_scraper._key)
-        if ctx is None:
+        page = await pool.new_page(self._sync_scraper._key)
+        if page is None:
             return []
 
-        page = None
         # Collect response objects; response.json() is async, so we must await
         # them after navigation completes (can't await inside sync callback).
         _captured_responses = []
@@ -146,7 +138,6 @@ class AsyncAirlineSnifferSource(AsyncBrowserScraperBase):
                     _captured_responses.append(response)
 
         try:
-            page = await ctx.new_page()
             await page.set_viewport_size({"width": 375, "height": 812})
             page.on("response", capture_json)
             await page.goto(url, wait_until="domcontentloaded", timeout=25000)
@@ -154,22 +145,20 @@ class AsyncAirlineSnifferSource(AsyncBrowserScraperBase):
             page.remove_listener("response", capture_json)
         except Exception as e:
             logger.warning(f"[{self._sync_scraper._key}] Browser error: {e}")
+            await pool.close_page(page)
             return []
-        finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-            await pool.release()
 
-        # Await all captured responses to get JSON data
+        # Await all captured responses BEFORE closing the page
+        # (response body needs the page to stay alive).
         all_json_responses = []
         for resp in _captured_responses:
             try:
                 all_json_responses.append(await resp.json())
             except Exception:
                 pass
+
+        # Now safe to close the page.
+        await pool.close_page(page)
 
         # Parse captured JSON (sync CPU work, no need for thread)
         results = []

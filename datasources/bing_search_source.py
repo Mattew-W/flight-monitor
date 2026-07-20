@@ -431,15 +431,12 @@ class BingSearchSource(BaseDataSource):
                 now = datetime.now().isoformat()
                 for fd in flight_data:
                     flights.append(FlightPrice(
-                        flight_no=fd["flight_no"],
-                        departure=original_query.departure,
-                        destination=original_query.destination,
-                        departure_date=original_query.departure_date,
-                        price=float(fd["price"]),
-                        cabin_class="economy",
-                        source="bing",
-                        timestamp=now,
-                    ))
+                flight_no=fd["flight_no"],
+                price=float(fd["price"]),
+                cabin_class="economy",
+                source="bing",
+                recorded_at=now,
+            ))
 
                 logger.info(f"[bing] Browser found {len(flights)} flights for {original_query.departure}->{original_query.destination}")
                 return flights
@@ -484,15 +481,12 @@ class BingSearchSource(BaseDataSource):
             if price < 100 or price > 50000:
                 continue
             flights.append(FlightPrice(
-                flight_no=flight_no,
-                departure=query.departure,
-                destination=query.destination,
-                departure_date=query.departure_date,
-                price=price,
-                cabin_class="economy",
-                source="bing",
-                timestamp=now,
-            ))
+            flight_no=flight_no,
+            price=price,
+            cabin_class="economy",
+            source="bing",
+            recorded_at=now,
+        ))
 
         # Strategy 2: Extract prices from snippet text
         snippet_pattern = re.compile(
@@ -509,15 +503,12 @@ class BingSearchSource(BaseDataSource):
             for fn in flight_nums:
                 for p in prices:
                     flights.append(FlightPrice(
-                        flight_no=fn,
-                        departure=query.departure,
-                        destination=query.destination,
-                        departure_date=query.departure_date,
-                        price=p,
-                        cabin_class="economy",
-                        source="bing",
-                        timestamp=now,
-                    ))
+                    flight_no=fn,
+                    price=p,
+                    cabin_class="economy",
+                    source="bing",
+                    recorded_at=now,
+                ))
 
         # Strategy 3: Try JSON-LD structured data
         jsonld_pattern = re.compile(
@@ -531,15 +522,12 @@ class BingSearchSource(BaseDataSource):
                     price = data.get("lowPrice") or data.get("price")
                     if price:
                         flights.append(FlightPrice(
-                            flight_no=query.departure + "-" + query.destination,
-                            departure=query.departure,
-                            destination=query.destination,
-                            departure_date=query.departure_date,
-                            price=float(price),
-                            cabin_class="economy",
-                            source="bing_jsonld",
-                            timestamp=now,
-                        ))
+                        flight_no=query.departure + "-" + query.destination,
+                        price=float(price),
+                        cabin_class="economy",
+                        source="bing_jsonld",
+                        recorded_at=now,
+                    ))
             except (json.JSONDecodeError, ValueError):
                 continue
 

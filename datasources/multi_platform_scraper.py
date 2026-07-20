@@ -82,36 +82,12 @@ class MultiPlatformScraper(BaseDataSource):
         return HAS_PLAYWRIGHT and self.url_builder is not None
 
     def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
-        if not self.is_available():
-            return []
-
-        pool = get_browser_pool()
-        ctx = pool.get_context(self.platform)  # per-platform isolation
-        if ctx is None:
-            return []
-        page = None
-        try:
-            page = ctx.new_page()
-            url = self.url_builder(query.departure, query.destination, query.departure_date)
-            logger.info(f"[{self.platform}] Loading {url[:80]}...")
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            except Exception as e:
-                logger.warning(f"[{self.platform}] goto failed: {e}")
-                return []
-            page.wait_for_timeout(4000)  # let dynamic content load
-
-            # Extract HTML first, then parse in a pure sync function.
-            html = page.content() if hasattr(page, 'content') else ""
-            return self._extract_prices_from_html(html, page.url, query)
-        except Exception as e:
-            logger.error(f"[{self.platform}] scrape error: {e}")
-            return []
-        finally:
-            if page:
-                try: page.close()
-                except Exception: pass
-            pool.release()
+        """Sync path is NOT supported — browser pool is async-only.
+        Use ``AsyncMultiPlatformScraper`` (from async_adapters) instead."""
+        raise NotImplementedError(
+            f"MultiPlatformScraper({self.platform}) does not support sync calls. "
+            f"Use AsyncMultiPlatformScraper from datasources.async_adapters."
+        )
 
     def _extract_prices_from_html(self, html: str, page_url: str, query: SearchQuery) -> List[FlightPrice]:
         """Try multiple strategies to extract prices from rendered HTML.

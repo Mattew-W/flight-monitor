@@ -231,72 +231,12 @@ class AirlineSnifferSource(BaseDataSource):
         return HAS_PLAYWRIGHT
     
     def search_flights(self, query: SearchQuery) -> List[FlightPrice]:
-        """Visit airline search page, intercept all JSON, extract flights."""
-        if not HAS_PLAYWRIGHT:
-            return []
-        
-        city_map = self._cfg["city_map"]
-        dep_code = city_map.get(query.departure, query.departure)
-        arr_code = city_map.get(query.destination, query.destination)
-        
-        url = self._cfg["search_url"].format(
-            dep=dep_code, arr=arr_code, date=query.departure_date
+        """Sync path is NOT supported — browser pool is async-only.
+        Use ``AsyncAirlineSnifferSource`` (from async_adapters) instead."""
+        raise NotImplementedError(
+            f"AirlineSnifferSource({self._key}) does not support sync calls. "
+            f"Use AsyncAirlineSnifferSource from datasources.async_adapters."
         )
-        
-        all_json_responses = []
-        
-        def capture_json(response):
-            if response.status == 200:
-                ct = response.headers.get("content-type", "")
-                if "json" in ct or "javascript" in ct:
-                    try:
-                        all_json_responses.append(response.json())
-                    except Exception:
-                        pass
-        
-        try:
-            pool = get_browser_pool()
-            ctx = pool.get_context(self._key)
-            if ctx is None:
-                logger.warning(f"[{self._key}] Failed to acquire browser context")
-                return []
-            page = None
-            try:
-                page = ctx.new_page()
-                page.set_viewport_size({"width": 375, "height": 812})
-                page.on("response", capture_json)
-                logger.debug(f"[{self._key}] Loading: {url[:80]}")
-                page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                page.wait_for_timeout(10000)
-                page.remove_listener("response", capture_json)
-            except Exception as e:
-                logger.warning(f"[{self._key}] Browser error: {e}")
-                return []
-            finally:
-                if page:
-                    try: page.close()
-                    except Exception: pass
-                pool.release()
-        except Exception as e:
-            logger.warning(f"[{self._key}] Browser pool error: {e}")
-            return []
-        
-        # Analyze all captured JSON responses
-        results = []
-        for data in all_json_responses:
-            flight_list = _find_flight_list(data)
-            if flight_list:
-                for item in flight_list:
-                    if isinstance(item, dict):
-                        flight = _normalize_flight(item, query, self.name)
-                        if flight:
-                            results.append(flight)
-        
-        if results:
-            logger.info(f"[{self._key}] {query.departure}->{query.destination}: "
-                       f"{len(results)} flights from {len(all_json_responses)} JSON responses")
-        
-        return results
 
 
 # ══════════════════════════════════════════════════════════════

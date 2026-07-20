@@ -313,10 +313,12 @@ def get_route_base_price(departure: str, destination: str) -> int:
         arr_code = CITY_CODES.get(destination, "")
         # If both sides have known codes, estimate higher
         if dep_code and arr_code:
-            return random.randint(2500, 5000)
+            s = int(hashlib.md5(f"{departure}{destination}".encode()).hexdigest()[:8], 16)
+            return 2500 + (s % 2501)  # 2500-5000
         return 3500
     else:
-        return random.randint(500, 1200)
+        s = int(hashlib.md5(f"{departure}{destination}".encode()).hexdigest()[:8], 16)
+        return 500 + (s % 701)  # 500-1200
 
 
 def build_purchase_url(platform_key: str, departure: str, destination: str,
@@ -359,9 +361,8 @@ class MockDataSource(BaseDataSource):
         daily_seed = int(hashlib.md5(query.departure_date.encode()).hexdigest()[:8], 16)
         daily_rng = random.Random(daily_seed)
 
-        # Time-based fluctuation
-        now = datetime.now()
-        time_factor = (now.hour * 60 + now.minute) / 1440.0
+        # Deterministic rng for any random operations (don't use global random!)
+        _rng = random.Random(seed_base)
 
         # Days until departure affects price
         try:
@@ -408,8 +409,8 @@ class MockDataSource(BaseDataSource):
 
             if route_airlines:
                 # Use route-specific airline list
-                num_flights = random.randint(8, 14)
-                used_airlines = random.sample(
+                num_flights = _rng.randint(8, 14)
+                used_airlines = _rng.sample(
                     route_airlines, min(num_flights, len(route_airlines))
                 )
             else:
@@ -419,15 +420,15 @@ class MockDataSource(BaseDataSource):
                     a for a in INTERNATIONAL_AIRLINES
                     if a not in chinese_majors
                 ][:12]
-                num_flights = random.randint(6, 12)
-                used_airlines = random.sample(
+                num_flights = _rng.randint(6, 12)
+                used_airlines = _rng.sample(
                     fallback_pool, min(num_flights, len(fallback_pool))
                 )
             aircraft_pool = LONG_HAUL_AIRCRAFT
         else:
             # Domestic routes: only use Chinese domestic airlines
-            num_flights = random.randint(12, 18)
-            used_airlines = random.sample(
+            num_flights = _rng.randint(12, 18)
+            used_airlines = _rng.sample(
                 DOMESTIC_AIRLINES, min(num_flights, len(DOMESTIC_AIRLINES))
             )
             aircraft_pool = SHORT_HAUL_AIRCRAFT
@@ -448,7 +449,7 @@ class MockDataSource(BaseDataSource):
         all_flights: List[FlightPrice] = []
 
         for i in range(num_flights):
-            flight_seed = seed_base + i * 7919 + int(time_factor * 100000)
+            flight_seed = seed_base + i * 7919
             rng = random.Random(flight_seed)
 
             airline = used_airlines[i % len(used_airlines)]

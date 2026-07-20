@@ -91,18 +91,34 @@ class Notifier:
                         f"(last sent {int(now - last)}s ago)"
                     )
                     return
+            # Dedup check passed — fall through to dispatch.
+            # We'll record the send only AFTER at least one channel actually
+            # submits, so we don't lose retries when all channels are down.
+
+        # Dedup: only mark as "sent" if at least one channel is actually
+        # configured, so we don't skip retries when all channels are down.
+        attempted = False
+
+        if send_email:
+            self._executor.submit(self._send_email, title, message)
+            attempted = True
+        if send_wechat:
+            self._executor.submit(self._send_serverchan, title, message)
+            attempted = True
+        if send_feishu and FEISHU_WEBHOOK:
+            self._executor.submit(self._send_feishu, title, message)
+            attempted = True
+
+        if query_id is not None and price is not None and attempted:
+            band = _price_band(price)
+            key = (query_id, band)
+            now = time.time()
+            with self._dedup_lock:
                 self._dedup[key] = now
                 # Opportunistic GC of stale entries (keep cache small).
                 if len(self._dedup) > 256:
                     cutoff = now - _DEDUP_WINDOW
                     self._dedup = {k: v for k, v in self._dedup.items() if v > cutoff}
-
-        if send_email:
-            self._executor.submit(self._send_email, title, message)
-        if send_wechat:
-            self._executor.submit(self._send_serverchan, title, message)
-        if send_feishu and FEISHU_WEBHOOK:
-            self._executor.submit(self._send_feishu, title, message)
 
     def close(self):
         """Explicit shutdown of the notification thread pool."""
