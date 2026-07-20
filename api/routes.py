@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 API_KEY = os.environ.get("FLIGHT_MONITOR_API_KEY", "")
 # Explicit opt-in for open mode (no API key required). Default: protected.
 OPEN_MODE = os.environ.get("FLIGHT_MONITOR_OPEN_MODE", "").lower() in ("1", "true", "yes")
-CORS_ORIGIN = os.environ.get("FLIGHT_MONITOR_CORS_ORIGIN", "*")
+CORS_ORIGIN = os.environ.get("FLIGHT_MONITOR_CORS_ORIGIN", "")
 # Comma-separated list of trusted proxy IPs. Only these can pass X-Forwarded-For.
 # Empty = trust no proxies (use remote_addr only). "*" = trust all (insecure).
 TRUSTED_PROXIES = os.environ.get("FLIGHT_MONITOR_TRUSTED_PROXIES", "")
@@ -147,9 +147,10 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
     # ── CORS + error handlers ───────────────────────────────────
     @app.after_request
     def _add_cors_headers(resp):
-        resp.headers["Access-Control-Allow-Origin"] = CORS_ORIGIN
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        if CORS_ORIGIN:
+            resp.headers["Access-Control-Allow-Origin"] = CORS_ORIGIN
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         return resp
 
     @app.errorhandler(404)
@@ -1015,10 +1016,15 @@ def create_app(db: Database = None, monitor: PriceMonitor = None) -> Flask:
         dep = data.get("departure", "")
         dst = data.get("destination", "")
         dep_date_str = data.get("departure_date", "")
-        price = float(data.get("price", 0))
+        try:
+            price = float(data.get("price", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "价格必须是有效数字"}), 400
+        if not math.isfinite(price) or price <= 0:
+            return jsonify({"error": "价格必须是一个有效的正数"}), 400
         cabin = data.get("cabin_class", "economy")
 
-        if not dep or not dst or not dep_date_str or price <= 0:
+        if not dep or not dst or not dep_date_str:
             return jsonify({"error": "请填写出发地、目的地、日期和当前价格"}), 400
 
         try:

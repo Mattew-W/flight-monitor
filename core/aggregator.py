@@ -286,6 +286,19 @@ class FlightAggregator:
                 seen_platforms[fn_key].add(p.source)
 
         all_prices = real_flights + matched_mock
+
+        # When all real sources fail, fall back to mock so the search page
+        # isn't blank. Mark these results explicitly as [预估].
+        if not real_flights and mock_flights:
+            logger.info(
+                f"Aggregator: no real data for {query.departure}->{query.destination}, "
+                f"falling back to {len(mock_flights)} mock results"
+            )
+            all_prices = mock_flights
+            # Override source to "[预估]Mock" so the frontend can flag it.
+            for p in all_prices:
+                p.source = "[预估]Mock"
+
         extra = FlightAggregator._generate_estimated_prices(
             real_flights, matched_mock, seen_platforms, plat_keys, query)
         all_prices.extend(extra)

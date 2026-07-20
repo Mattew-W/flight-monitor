@@ -80,6 +80,7 @@ class AsyncBrowserPool:
         self._last_used = 0.0
         self._refcount = 0
         self._warmup_done = set()
+        self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ── Public API ──────────────────────────────────────────
 
@@ -91,6 +92,15 @@ class AsyncBrowserPool:
             return None
         async with self._lock:
             now = time.time()
+            # If the event loop has changed (monitor restart), recreate
+            # everything — old browser objects are bound to the dead loop.
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if self._browser and self._owner_loop and current_loop != self._owner_loop:
+                logger.info("BrowserPool: event loop changed, recreating browser")
+                await self._close_internal()
             if (self._browser
                     and (now - self._last_used) > _IDLE_TIMEOUT
                     and self._refcount == 0):
@@ -179,6 +189,7 @@ class AsyncBrowserPool:
             if _CHROME_PATH:
                 launch_kw["executable_path"] = _CHROME_PATH
             self._browser = await self._playwright.chromium.launch(**launch_kw)
+            self._owner_loop = asyncio.get_running_loop()
             mode_str = "HEADED" if _HEADED_MODE else "headless"
             logger.info(f"BrowserPool: Chromium started ({mode_str})")
             return True
@@ -232,3 +243,24 @@ async def get_browser_pool() -> AsyncBrowserPool:
         if _pool is None:
             _pool = AsyncBrowserPool()
         return _pool
+
+
+# ── Cleanup on process exit ──────────────────────────────
+
+def shutdown_browser_pool():
+    """Synchronous cleanup called from atexit (may run in any thread)."""
+    import asyncio as _asyncio
+    global _pool
+    if _pool is None:
+        return
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_pool.shutdown())
+        else:
+            loop.run_until_complete(_pool.shutdown())
+    except Exception:
+        pass
+
+import atexit
+atexit.register(shutdown_browser_pool)

@@ -287,16 +287,23 @@ class PricePredictorV3:
         return round(predicted), round(lower), round(upper)
 
     def _days_to_departure_modifier(self, days_left: int) -> float:
-        """U-shaped price curve from Indian data."""
+        """U-shaped price curve from Indian data.
+
+        The modifier is continuous across all boundaries (0, 14, 60, 90).
+        Values at key points: 90d=1.0, 60d≈1.0→0.83, 14d≈0.88, 0d=1.40.
+        """
         if days_left <= 0:
             return 1.0
         if days_left >= 90:
             return 1.0
         elif days_left >= 60:
-            return 0.9 + 0.1 * (60 - days_left) / 30
+            # 1.0 at 90d → 0.90 at 60d (continuous with >=90 branch)
+            return 0.9 + 0.1 * (90 - days_left) / 30
         elif days_left >= 14:
-            return 0.8 + 0.05 * (60 - days_left) / 46
+            # 0.833 at 60d → 0.883 at 14d (continuous with 60-90 branch)
+            return 0.8 + 0.05 * (90 - days_left) / 76
         else:
+            # 0.85 at 14d → 1.40 at 0d (continuous with 14-60 branch)
             return 0.85 + 0.55 * (14 - days_left) / 14
 
     def _sanity_check(self, predicted: float, features: Dict, flights: List[Dict]) -> float:

@@ -23,9 +23,9 @@ class TestFlaskClient:
         assert "error" in data
 
     def test_cors_headers(self, flask_client):
-        """CORS headers should be present."""
+        """CORS headers absent by default (same-origin safe). Set CORS_ORIGIN to enable."""
         response = flask_client.get("/")
-        assert "Access-Control-Allow-Origin" in response.headers
+        assert "Access-Control-Allow-Origin" not in response.headers
 
 
 class TestAPIRoutes:
